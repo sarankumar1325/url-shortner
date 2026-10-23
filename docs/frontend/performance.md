@@ -1,148 +1,84 @@
 # Frontend Performance
 
-Status: target design · Related: [Frontend architecture](architecture.md) · [UI system](ui-and-a11y.md)
+Status: proposed targets and measurements, not enforced budgets · Related: [architecture](architecture.md), [data fetching](data-fetching.md), [UI](ui-and-a11y.md)
 
-## Performance budgets
+## Baseline and targets
 
-Measured at p75 on a mid-tier mobile device over 4G:
+The repository has a React/Vite starter and lint/build scripts. It does **not** yet have product-route measurements, size-limit, Lighthouse CI, browser performance tests or production Web Vitals reporting. Existing build output is not evidence that the future application meets these targets.
 
-| Metric | Budget |
+| Metric | Proposed target |
 | --- | --- |
 | LCP | < 2.5 s |
 | INP | < 200 ms |
 | CLS | < 0.1 |
-| TTFB (HTML) | < 800 ms |
-| Initial JS (gzip) | < 200 KB |
-| Initial CSS (gzip) | < 30 KB |
-| Analytics route JS (gzip, lazy) | < 150 KB |
-| Total transferred for first view | < 500 KB |
+| HTML TTFB | < 800 ms |
+| Home's initial JS, gzip | < 200 KB |
+| Initial CSS, gzip | < 30 KB |
+| Additional lazy analytics JS, gzip | < 150 KB |
+| Total first-view transfer | < 500 KB |
 
-Budgets are enforced in CI with `size-limit`; Lighthouse/Playwright checks run on the preview deployment.
+Establish a repeatable lab baseline on a documented mobile device/throttling profile and separate cold/warm navigation runs. Field targets are p75, segmented by device and route; a single Lighthouse score is not field p75, and lab interaction checks are not a measured production INP. Record tool versions, network profile, commit and whether responses/assets were cached before comparing changes.
 
-## Why this app can be fast
+## Keep the initial route small
 
-- It is a static SPA served from Vercel's CDN; there is no server render to wait for.
-- The home screen needs only a form and local storage; it does not need charts or analytics libraries.
-- Short-link creation is a single POST; redirects happen outside the app.
-- System fonts avoid render-blocking font downloads.
-- There are no large images or third-party scripts in v1.
+- Keep home/create and the not-found view eager; load management/analytics and chart code on their route. Verify the built dependency graph: a lazy page does not help if its chart is re-exported through an eager module.
+- Use system fonts, CSS transitions and only the UI/icon modules needed. Do not add an animation library or large date library for simple UTC calendar arithmetic.
+- Reserve space for result cards, totals and charts; match loading layouts to avoid shifts.
+- Profile before adding memoization. Daily analytics has at most 366 buckets; V1 does not need a generalized virtualization layer.
+- Bound visible recent-link rows and their metadata requests; do not fetch every remembered link on startup. Local records are not an authorization or freshness check.
+- Add preconnect only if a measured API-origin handshake is on the critical path; no blanket hints for preview or unrelated origins.
 
-## Loading strategy
+## Cache efficiency must preserve authorization
 
-### Route-level code splitting
+TanStack Query is planned to deduplicate by key, with metadata stale for 30 s and analytics for 60 s and five-minute inactive garbage collection. Those are reuse targets, not server-freshness guarantees. The detailed request policy lives in [data fetching](data-fetching.md).
 
-```tsx
-const LinkAnalyticsPage = lazy(() => import("@/pages/link-analytics-page"));
+Correctness comes first:
 
-<Route
-  path="/links/:code"
-  element={
-    <Suspense fallback={<RouteSkeleton />}>
-      <LinkAnalyticsPage />
-    </Suspense>
-  }
-/>
-```
+- Public metadata and metadata carrying a token use distinct keys. Every private key includes code and a non-secret credential generation; analytics also includes the validated UTC range/interval. Tokens or token hashes must never be key material.
+- On token replacement, rejection or forget, cancel/remove private queries and clear their displayed/retained results. Ignore late responses from old generations, including stale 401s that must not reject a newer credential. Apply the same behavior across tabs.
+- Never persist Query data or token-bearing mutation results. Browser localStorage is limited to explicit credential remembrance and minimal local list data; memory is the default.
+- Retain last successful analytics while a same-credential refresh/range request is pending, labeled with its real range and an updating/error state. Do not reuse it across codes or credentials, or after authoritative access/state rejection.
+- Do not prefetch analytics without a credential or let a fresh old cache entry hide a rejected replacement token. Test that supplying a token to metadata actually validates that token, even if public metadata is already cached.
 
-- Home and the 404 page are eager.
-- Analytics and its chart library load only when the route is visited.
-- The Suspense fallback mirrors the final layout to avoid layout shift.
+Use one analytics request per range, not per day. Disable focus refetch; poll at most once per 60 seconds only on a visible, mounted analytics view with a usable credential. Stop polling on forget, rejection, hidden tabs or unmount. Manual refresh remains available.
 
-### Heavy dependencies
+Default mutation retries are zero. Only the explicit create sequence may retry once for network failure, timeout or 503 with the same UUIDv4 key and body; request-in-progress is manual. PATCH, DELETE and caller cancellation never automatically retry. Measure duplicate requests as correctness failures, not merely excess traffic.
 
-- Import icons individually (`lucide-react` is tree-shakeable).
-- Import only the shadcn components used.
-- Load Recharts with the analytics route, never from the home route.
-- Prefer `Intl.DateTimeFormat` or a small `date-fns` import over a large date library.
-- Avoid adding an animation library for simple CSS transitions.
+## Perceived performance and truthful data
 
-### Network hints
+Create waits for the server-generated result. Disable duplicate submits, preserve the draft/attempt on transport failure and keep the one-time token backup usable before navigation. Copy is local and should not trigger a request.
 
-Add to `index.html`:
+Show loading before the first analytics response, then processed totals/zero-filled series without fabricating values. Keep successful old results during permitted refetches rather than blanking the screen. A failed refetch shows a warning alongside explicitly stale data.
 
-```html
-<link rel="preconnect" href="https://api.short.example" crossorigin />
-<link rel="dns-prefetch" href="https://api.short.example" />
-<link rel="preconnect" href="https://short.example" />
-```
+Rollups cover the requested UTC `[from,to)`; V1 breakdowns cover only available raw events from the last 90 UTC days, including today. Show the returned breakdown range and truncation. `last_processed_at` is a nullable retained-event ingestion timestamp, not a fetch timestamp or pipeline-health proof; the nullable watermark `data_through` is null in V1. Measure fetch duration separately from backend processing-lag metrics; never promise one-minute delivery or infer complete ingestion from zeros. See [backend analytics](../backend/analytics.md).
 
-- Preconnect only to origins used on the critical path.
-- Do not preconnect to preview or third-party domains.
-- The API is called after user action, so preconnect is a hint, not a blocker.
+## HTTP delivery targets
 
-## Data fetching performance
-
-- TanStack Query deduplicates concurrent requests for the same key.
-- `staleTime` prevents refetch storms: 30 s for metadata, 60 s for analytics.
-- `refetchOnWindowFocus` is disabled; analytics polls only while visible.
-- No request is made while the user types; validation is local and the API is called on submit.
-- Query cache is in memory and cleared on full reload; do not persist it in v1.
-- The recent-links list reuses cached metadata and caps the number of visible items.
-
-## Rendering performance
-
-- Keep the home route free of chart and date-picker code.
-- Split provider trees so the analytics page does not remount global providers.
-- Memoize expensive chart transforms (`useMemo`) and keep chart data small (daily buckets).
-- Do not use `useMemo`/`memo` by default; profile first.
-- Use CSS for hover/focus states; avoid JS-driven animations.
-- Reserve space for async content (fixed chart height, skeleton cards) to prevent CLS.
-
-## Caching and delivery
-
-| Asset | Header |
+| Content | Required/target behavior |
 | --- | --- |
-| `/assets/*` (hashed) | `public, max-age=31536000, immutable` |
-| `/index.html` | `no-cache` (revalidate) |
-| API responses | handled by the API; redirects are `no-store` |
+| Fingerprinted static assets | Long-lived immutable caching; verify actual deployed headers |
+| HTML, including SPA fallback | Revalidate (`no-cache`), not immutable |
+| Every API success/error response | `Cache-Control: no-store`; browser request also uses `cache: "no-store"` |
+| Redirects on backend short domain | `no-store`, outside the SPA delivery path |
 
-- Vercel serves hashed assets from the CDN edge.
-- Do not add a service worker in v1; it complicates deploys and analytics.
-- HTTP/2/3 and Brotli are provided by Vercel.
+Bounded in-memory Query caching does not change the HTTP policy. No service worker or offline mutation queue in V1. Do not assume compression, rewrite precedence or asset headers from hosting defaults; inspect the deployed responses, including missing asset paths. See [deployment](deployment.md).
 
-## Measuring
+## Proposed measurement workflow
 
-### Local
+From the repository root, using dependencies already installed from the lockfile:
 
 ```bash
-bun run build
-bun run preview
+bun run --cwd "./urlshortner" build
+bun run --cwd "./urlshortner" preview --host 127.0.0.1
 ```
 
-- Chrome DevTools Lighthouse (mobile, throttled).
-- Network panel: verify the analytics chunk is not loaded on `/`.
-- React Profiler for interaction regressions.
+These existing scripts can exercise the scaffold; no product baseline or successful build is asserted here. The [deployment guide](deployment.md) contains frozen-install and verification prerequisites.
 
-### CI
+1. **Bundle/build:** record compressed initial and route chunks; use browser Network to confirm charts are absent on `/` and not redundantly downloaded during navigation.
+2. **Interaction:** trace create through response, token reveal/copy, route navigation, date changes and manual refresh. Separate network wait from render work with browser/React profiling; check pending/retained states under slow and failed requests.
+3. **Authorization regression:** switch/forget/reject tokens during slow metadata and analytics requests; exercise cross-tab removal. Confirm no old private data reappears, no private HTTP cache hits occur and query keys/devtools contain no token.
+4. **Delivery:** compare cold/warm reloads and deep links on a controlled preview; inspect HTML, hashed assets, all API response classes and `no-store` headers.
+5. **Future CI:** after tooling and repeatable baselines exist, add bundle-budget and browser regression gates. Until then document measured deltas in review rather than claiming automated enforcement.
+6. **Optional field telemetry:** add only after privacy/security review, explicit origin/CSP approval and sampling. Measure Web Vitals, JS errors and sanitized route templates such as `/links/:code`; never tokens, request bodies, full destination URLs or identifying route values. Do not assume a hosted insights/error SDK is already installed.
 
-- `size-limit` on initial and route chunks.
-- Playwright trace for the create flow.
-- Lighthouse CI on the preview URL (optional but recommended).
-- Fail the build on budget regressions rather than relying on review.
-
-### Production
-
-- Vercel Speed Insights for Core Web Vitals by route.
-- Optional Sentry performance for slow API calls and route transitions.
-- Track JS error rate and API error rate separately.
-- Use the deployed commit SHA to correlate regressions with releases.
-
-## API and UX performance
-
-- Show optimistic UI only where it is safe; link creation waits for the server because the short code is server-generated.
-- Copy acts immediately; no network is required.
-- Disable duplicate submits while a create is pending.
-- Cap recent links to avoid rendering hundreds of rows; add pagination if the list grows.
-- Use a single request for analytics ranges rather than per-day calls.
-- Truncate long URLs from the middle for layout stability, preserving the full value for assistive technology.
-
-## Regression checklist
-
-- [ ] Analytics chunk is absent from the initial network waterfall.
-- [ ] Initial JS and CSS are within budget.
-- [ ] LCP/INP/CLS pass on a throttled mobile profile.
-- [ ] No layout shift when the result card or chart appears.
-- [ ] No duplicate API calls for the same query key.
-- [ ] No third-party scripts except explicitly approved analytics/error tools.
-- [ ] Images are SVG or optimized and have explicit dimensions.
-- [ ] Fonts are system fonts or self-hosted with `font-display: swap`.
+Release review should include both performance evidence and authorization tests; a faster cache that leaks previous credentials' results is a regression.

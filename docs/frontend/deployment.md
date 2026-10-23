@@ -1,212 +1,122 @@
 # Frontend Deployment on Vercel
 
-Status: target design · Related: [Frontend architecture](architecture.md) · [Backend deployment](../backend/deployment.md)
+Status: deployment plan, not a verified deployment · Related: [architecture](architecture.md), [backend deployment](../backend/deployment.md), [API contract](../backend/api.md)
 
-## Vercel project configuration
+## What exists and what remains gated
 
-- **Root directory**: `urlshortner`
-- **Framework preset**: Vite
-- **Install command**: `bun install` (auto-detected from `bun.lock`)
-- **Build command**: `bun run build`
-- **Output directory**: `dist`
-- **Node.js**: 22.12+ (Vite 8 requirement); Vercel's current LTS default is fine
-- **Bun**: 1.4.x; commit `bun.lock` and pin via `packageManager`
+The frontend is `urlshortner/`, with React/Vite source, `bun.lock`, an environment example, and `dev`, `lint`, `build`, `preview` scripts. `build` runs `tsc -b && vite build`. There is no frontend `vercel.json`, `packageManager` pin, strict-TypeScript setting, product router, API type-generation script or Vitest setup yet. Existing `dist/` output does not establish deployability or product readiness.
 
-`package.json`:
+A future deployment must prove the checked-in `index.html` entrypoint, source imports and public assets resolve in a clean build and hosted browser. Do not assume a configuration snippet or Vercel framework detection works without preview evidence. Backend package/entrypoint resolution is separately gated by [backend deployment](../backend/deployment.md); a healthy static page does not prove the API is ready.
 
-```json
-{
-  "packageManager": "bun@1.4.0",
-  "engines": {
-    "node": ">=22.12"
-  },
-  "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
-    "preview": "vite preview",
-    "lint": "oxlint",
-    "test": "vitest run"
-  }
-}
-```
+## Project settings to verify
 
-If Vercel does not auto-detect Bun, set the install command explicitly to `bun install` in project settings.
+| Setting | Target |
+| --- | --- |
+| Vercel project | Separate frontend project, distinct from API/redirects |
+| Root directory | `urlshortner` |
+| Framework | Vite, confirmed in build output |
+| Install | `bun install --frozen-lockfile` |
+| Build | `bun run build` |
+| Output | `dist` |
+| Runtime/toolchain | Explicit tested Bun and compatible Node versions, recorded in project settings |
 
-## Environment variables
+Pin the tested Bun version through `packageManager` in a later implementation change and verify that the hosting build actually uses it. Check the locked Vite/plugin engine requirements against the selected Node runtime; do not rely on a moving “current LTS” or claim a pin already exists. A frozen-install failure is a release blocker, not permission to regenerate the lock during deployment. Lock updates belong in a reviewed dependency change.
 
-Vite embeds `VITE_*` variables at build time, so changing one requires a new deployment.
+### Plan/capability gate
 
-| Variable | Local | Production |
+Before wiring production or previews, record the chosen Vercel plan and confirm its support/limits for this repository, Git integration, preview protection, build/runtime versions, usage and spend controls. Automatic PR previews are an integration setting to verify, not an unconditional platform promise.
+
+For the integrated product, also confirm the backend plan's function runtime/duration, region and scheduler capabilities. Minute-level cron requires a supporting plan or a separately validated external scheduler. Hobby's daily schedule does not meet the V1 two-minute healthy-operation freshness target; slower processing requires an explicit product/SLO change, not a silent deployment fallback. The frontend must display actual analytics freshness regardless of schedule. Do not promise a one-minute end-to-end guarantee.
+
+## Environment and origins
+
+These are public **build-time** values. Changing them requires a new build/deployment; no secret belongs in any `VITE_*` value.
+
+| Variable | Local example | Production example |
 | --- | --- | --- |
 | `VITE_API_BASE_URL` | `http://127.0.0.1:8000` | `https://api.short.example` |
 | `VITE_SHORT_BASE_URL` | `http://127.0.0.1:8000` | `https://short.example` |
 
-Rules:
+All `short.example` hostnames here are placeholders. Validate required URLs before a release build: HTTPS outside local development, expected origin, no embedded credentials or tokens. Keep local environment files untracked. The implementation should prefer the API's returned `short_url` for copying rather than inventing a potentially mismatched short domain.
 
-- Never place secrets in `VITE_*` variables; they are visible in the bundle.
-- Preview deployments use the preview API URL, not production.
-- Keep `.env.local` out of version control; commit `.env.example`.
-- Validate env variables at startup and fail fast with a clear error if missing.
+- Production web origin: for example `https://app.short.example`.
+- Preview: a controlled frontend preview origin paired with a preview API, preview short domain and isolated backend data. Never use production credentials, links or analytics stores for preview tests.
+- Local web origin: normally `http://localhost:5173`; `127.0.0.1` and alternate ports are distinct origins and must be explicitly allowed if used.
 
-```ts
-// src/shared/lib/env.ts
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL;
-const shortBaseUrl = import.meta.env.VITE_SHORT_BASE_URL;
+CORS belongs to the API, not the static frontend. Allow only exact approved frontend origins, with methods `GET`, `HEAD`, `POST`, `PATCH`, `DELETE`, `OPTIONS` and request headers `Content-Type`, `Idempotency-Key`, `X-Management-Token`, `X-Request-ID`. Expose `Location`, `X-Request-ID`, `Retry-After` and the documented rate-limit headers. V1 uses token headers, not cookie credentials.
 
-if (!apiBaseUrl || !shortBaseUrl) {
-  throw new Error("Missing VITE_API_BASE_URL or VITE_SHORT_BASE_URL");
-}
+For previews, register exact origins from trusted deployment metadata or use an exact controlled preview alias. Remove retired origins. **Do not use `*`, `*.vercel.app`, project-name wildcard patterns or broad preview-origin regexes.** Production CORS must not acquire preview entries by default. Test OPTIONS and actual browser requests, including error responses.
 
-export const env = { VITE_API_BASE_URL: apiBaseUrl, VITE_SHORT_BASE_URL: shortBaseUrl };
+## Routing, cache and security headers
+
+Plan the SPA fallback only for document navigation. Verify real assets are served as assets and missing assets/API-like paths do not silently become an HTTP-200 HTML success. The API is a separate origin; do not proxy it through a catch-all static rewrite.
+
+Deep links such as `/links/abc123` must load on refresh. An unknown client route normally gets the SPA shell with **HTTP 200** and then renders its not-found UI; that is not a true HTTP 404. True document status behavior needs a different hosting design.
+
+| Response | Policy to verify on the deployed URL |
+| --- | --- |
+| Fingerprinted `/assets/*` | `Cache-Control: public, max-age=31536000, immutable` |
+| HTML and SPA fallback | `Cache-Control: no-cache` (revalidate) |
+| All API responses, including public metadata/errors/204 | `Cache-Control: no-store`, configured by backend |
+| Backend redirects | `Cache-Control: no-store`, outside this project |
+
+No service worker or persisted Query cache in V1. Check that HTML fallback headers do not accidentally make assets uncacheable or missing HTML responses immutable.
+
+Security-header targets: `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, and a Permissions Policy disabling unused camera, microphone and geolocation. A starting **production CSP policy to test**, not a configuration already installed:
+
+```text
+default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://api.short.example; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
 ```
 
-## SPA routing and headers
+Generate/check the policy per environment: `connect-src` must contain the **exact deployed API origin**, and only exact explicitly approved telemetry origins if that tooling is later added. Preview builds must allow their preview API rather than a wildcard or production API. Keep scripts same-origin, without blanket inline/eval allowances. Test chart/component inline styles; if necessary, document and narrowly scope a style exception rather than copying a generic permissive policy. Preview toolbars or protection flows also need testing; disable unneeded injections rather than weakening CSP broadly.
 
-React Router needs a fallback to `index.html` for client-side routes. Vercel serves existing static files before applying rewrites, so hashed assets are unaffected.
+Verify HTTPS/certificate ownership for each hostname. Review existing platform HSTS and start with an appropriate host-scoped policy; do **not** blindly add `includeSubDomains` or `preload`. Those require domain-wide HTTPS readiness, ownership review and a deliberate rollout.
 
-`urlshortner/vercel.json`:
+## Verification commands from the repository root
 
-```json
-{
-  "$schema": "https://openapi.vercel.sh/vercel.json",
-  "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": "/index.html"
-    }
-  ],
-  "headers": [
-    {
-      "source": "/assets/(.*)",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=31536000, immutable"
-        }
-      ]
-    },
-    {
-      "source": "/(.*)",
-      "headers": [
-        {
-          "key": "Strict-Transport-Security",
-          "value": "max-age=63072000; includeSubDomains; preload"
-        },
-        {
-          "key": "X-Content-Type-Options",
-          "value": "nosniff"
-        },
-        {
-          "key": "Referrer-Policy",
-          "value": "strict-origin-when-cross-origin"
-        },
-        {
-          "key": "X-Frame-Options",
-          "value": "DENY"
-        },
-        {
-          "key": "Permissions-Policy",
-          "value": "geolocation=(), microphone=(), camera=()"
-        },
-        {
-          "key": "Content-Security-Policy",
-          "value": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://api.short.example; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
-        }
-      ]
-    }
-  ]
-}
-```
+The following are operator instructions, not commands executed by this documentation review. Run from `/Users/saran/Downloads/learning/url shortner` (or the equivalent checkout root); there is no root frontend package script.
 
-Notes:
-
-- Connect-src must include the API origin. Add any approved error/analytics origins explicitly.
-- `style-src 'unsafe-inline'` is required by some component and chart inline styles. If a nonce-based setup becomes possible, tighten it.
-- The CSP is production-specific; preview deployments need their API origin added or a preview-specific header.
-- Do not add `Access-Control-Allow-Origin` here; CORS belongs to the API.
-- The rewrite must not break `/api` because the API is a separate domain, not a path on the web origin.
-
-## Domains and TLS
-
-- Add `app.short.example` as the production domain to the frontend project.
-- Add `api.short.example` and `short.example` to the backend project.
-- Let Vercel manage DNS and certificates, or point existing DNS at Vercel.
-- Verify HTTPS and HSTS after DNS propagation.
-- Keep the API and web app on separate origins as designed; do not proxy API traffic through the static site.
-
-## Preview deployments
-
-- Every pull request gets a Vercel preview URL.
-- The preview frontend points at a preview API (`VITE_API_BASE_URL` preview scope).
-- Add the preview origin to the backend's preview CORS allowlist. If using wildcard preview URLs, configure a constrained regex (for example `https://urlshortner-*.vercel.app`) only in preview, never in production.
-- Preview builds use the same code path as production; do not gate features with `NODE_ENV` differences beyond env URLs.
-- Do not let previews write to production analytics or production links.
-
-## Deploy order
-
-1. Deploy or verify the backend and its `/health` and `/ready`.
-2. Confirm the frontend's API and short base URLs.
-3. Build the frontend (`bun run build`).
-4. Deploy to Vercel.
-5. Smoke test: create a link, copy it, follow it, open analytics with the token.
-6. Check CSP violations and CORS errors in the browser console.
-
-## Rollback
-
-- Use Vercel's instant rollback to a previous deployment.
-- Environment variable changes require a redeploy; roll back both the deployment and the env if they changed together.
-- The frontend is stateless; no migration or cleanup is needed.
-- If the API contract changed, roll back the backend first or use an additive contract.
-
-## CI checks
-
-Before merging:
-
-- `bun run lint` (oxlint)
-- `bunx tsc -b`
-- `bun run test`
-- `bun run build`
-- Generated API types are current
-- Bundle size budget passes
-- Playwright E2E against preview or local stack (optional gate)
-
-Vercel builds previews automatically; CI should fail fast before Vercel spends a build.
-
-## Local development
+Current scripts/tooling, after selecting compatible versions:
 
 ```bash
-cd urlshortner
-bun install
-cp .env.example .env.local
-bun dev
+bun --version
+node --version
+bun install --cwd "./urlshortner" --frozen-lockfile
+bun run --cwd "./urlshortner" lint
+./urlshortner/node_modules/.bin/tsc -b ./urlshortner/tsconfig.json
+bun run --cwd "./urlshortner" build
+bun run --cwd "./urlshortner" preview --host 127.0.0.1
 ```
 
-`.env.local`:
+Typechecking is also part of `build`; the explicit command isolates its failures and uses the installed compiler without fetching an unpinned `bunx` package. Passing it does not imply strict mode, which is not currently enabled. The final command starts a local static preview, not a backend or production server.
 
-```dotenv
-VITE_API_BASE_URL=http://127.0.0.1:8000
-VITE_SHORT_BASE_URL=http://127.0.0.1:8000
+The following commands are **planned only**, after the corresponding scripts/dependencies and product schema exist:
+
+```bash
+bun run --cwd "./urlshortner" api:types
+git diff --exit-code -- "./urlshortner/src/shared/api/schema.d.ts"
+bun run --cwd "./urlshortner" test
+bun run --cwd "./urlshortner" test:e2e
 ```
 
-Run the backend on port 8000 and confirm CORS includes `http://localhost:5173`.
+Define `api:types` to use a pinned local generator against a verified backend OpenAPI snapshot or controlled running API. Commit generated types; CI should regenerate and detect drift, including unexpected new output, before compiling. Define `test` for Vitest and `test:e2e` for the controlled preview/local stack. Until these exist, do not advertise them as successful checks or installed capabilities. Bundle/accessibility gates likewise require implementation and a recorded baseline; see [performance](performance.md).
 
-## Caching behavior
+## Preview and production gates
 
-- Hashed assets: immutable, one-year cache.
-- `index.html`: revalidated so new deployments are picked up.
-- No service worker in v1.
-- API calls are not cached by the browser; TanStack Query caches in memory.
-- Redirect URLs are not part of this project.
+1. **Reproducibility:** clean frozen install, actual tool versions recorded, lint/typecheck/build pass; all planned feature tests/types needed for release have landed and passed. Verify HTML entrypoint and emitted assets in a browser with no console exceptions.
+2. **Backend readiness:** preview API entrypoint/package resolution, health/readiness, migrations and isolated data are verified by its owner. Confirm the API schema matches generated client types. Vercel cron runs only on production deployments: test preview drains through explicitly authorized manual invocations, and verify the production schedule before promotion.
+3. **Origin isolation:** preview points only to preview API/data; exact CORS preflight succeeds; CSP permits the intended connections and denies unintended ones. Confirm any preview deployment protection allows the intended browser flow without exposing bypass secrets in the bundle.
+4. **Routing/delivery:** `/`, direct `/links/:code`, unknown routes, existing/missing assets, actual cache/security headers and compressed delivery behave as intended. Inspect both HTTP status and rendered page rather than treating the not-found component as a 404 response.
+5. **Contract smoke tests:** create with a UUIDv4 key; replay identical key/body and verify the same link/token; distinguish all 409 codes; cancel/timeout safely; test copy/token backup, explicit remembrance and denied storage, token replacement/rejection/cross-tab forget, PATCH, repeated valid-token DELETE returning 204, and the backend redirect.
+6. **Analytics:** active and token-authorized expired/inactive links work; invalid-token metadata returns 401 and deleted/blocked reads 404. Check UTC presets, zero-filled series, V1 breakdown ranges/truncation, nullable freshness and retained-result labels under delay. Confirm all API success/error responses are `no-store`.
+7. **Promotion:** keyboard/accessibility checks and proposed performance measurements are reviewed; domain/certificates, production environment/CSP/CORS and plan limits are approved. Retain a known compatible previous deployment and record release evidence before promotion.
 
-## Deployment checklist
+A green static build alone is not approval to release the product. Do not run production mutations to test a preview.
 
-- [ ] `bun.lock` is committed and current.
-- [ ] `VITE_API_BASE_URL` and `VITE_SHORT_BASE_URL` are set per environment.
-- [ ] SPA rewrite works for a deep link such as `/links/abc123`.
-- [ ] CSP allows the API origin and no unexpected sources.
-- [ ] CORS on the API includes the deployed web origin.
-- [ ] Hashed assets return immutable cache headers.
-- [ ] `index.html` is not cached indefinitely.
-- [ ] Preview deployments use preview data.
-- [ ] Create, copy, redirect, and analytics work end to end.
-- [ ] Rollback deployment is known.
+## Release and rollback
+
+Deploy a backward-compatible backend and verify it before promoting a frontend that needs the new contract. Rebuild when public environment values change; check the promoted bundle actually contains the intended non-secret origins.
+
+For rollback, choose a known frontend artifact compatible with the currently running API and stored credential-record version. Verify rollback availability/permissions on the selected Vercel plan. Do not automatically roll back the backend first: migrations and client compatibility must be considered together. A static app still has browser state, open tabs and old cached assets; keep required assets/contracts compatible during the transition. Preserve token copies and make invalid/corrupt stored records fail safely rather than silently deleting access.
+
+After rollback, verify create/replay, token-scoped reads, redirects, deep links, headers and environment isolation again.

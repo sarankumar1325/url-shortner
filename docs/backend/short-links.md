@@ -1,184 +1,102 @@
 # Short-Link Strategy
 
-Status: target design · Related: [Data model](data-model.md) · [API](api.md) · [ADR 0003](../adr/0003-short-code-strategy.md)
-
-## Goals
-
-- Allocate a unique code for every link without a central counter or coordination between serverless instances.
-- Keep the redirect lookup to a single indexed equality match.
-- Make link enumeration impractical.
-- Allow human-readable custom aliases without weakening uniqueness.
-- Keep the namespace safe from collisions and reserved routes.
+Status: target design · Related: [API](api.md) · [Data model](data-model.md) · [ADR 0003](../adr/0003-short-code-strategy.md)
 
 ## Generated codes
 
-| Property | Value |
-| --- | --- |
-| Alphabet | Base62: `0-9A-Za-z` |
-| Length | 7 characters |
-| Namespace size | `62^7 = 3,521,614,606,208` (about 3.5 trillion) |
-| Case sensitivity | Yes |
-| Source of randomness | `secrets` (CSPRNG) |
-| Uniqueness mechanism | Unique constraint on `urls.short_code` + bounded retry |
+- Generate 7 case-sensitive Base62 characters using `secrets.choice`.
+- Namespace: `62^7 = 3,521,614,606,208`; entropy: about 41.7 bits.
+- Enforce uniqueness in Postgres, including soft-deleted codes. Never recycle codes.
+- Reserve service routes for generated codes as well as custom aliases.
+- Randomness discourages sequential enumeration; a short code is public, NOT an authorization secret.
 
 ```python
 import secrets
 import string
 
 ALPHABET = string.ascii_letters + string.digits
-CODE_LENGTH = 7
 
 
 def generate_code() -> str:
-    return "".join(secrets.choice(ALPHABET) for _ in range(CODE_LENGTH))
+    return "".join(secrets.choice(ALPHABET) for _ in range(7))
 ```
-
-`secrets.choice` uses rejection sampling internally, so the distribution over the 62 symbols is uniform. Do not use `random`.
 
 ### Collision handling
 
-Uniqueness is enforced by the database, not by a pre-flight `SELECT`, which would race.
+Use `INSERT ... ON CONFLICT (short_code) DO NOTHING RETURNING ...`. Retry a generated-code conflict up to five times; a custom alias conflict returns `409 alias_taken`. Do not catch every integrity error as a collision: token, foreign-key, or schema failures are different faults. If using exceptions, roll back to a savepoint before retrying inside the create transaction.
 
-```python
-for attempt in range(1, MAX_ATTEMPTS + 1):
-    code = generate_code()
-    try:
-        async with transaction():
-            link = await repository.insert_link(code=code, ...)
-        return link
-    except UniqueViolation:
-        metrics.increment("link.code_collision", tags={"attempt": attempt})
-        continue
+No pre-flight existence query guarantees uniqueness. The create transaction also persists the idempotency result described in [api.md](api.md#idempotent-creation).
 
-raise CodeSpaceExhausted()
-```
+### Capacity and enumeration
 
-Behavior:
+For `n` occupied generated-format codes, per-attempt collision probability is `n / 62^7`.
 
-- Generated codes retry up to 5 times with a fresh code.
-- Custom aliases never retry; a conflict is a `409 alias_taken`.
-- Exhausting retries is effectively impossible at v1 scale and returns `503 dependency_unavailable` with an alert.
-- The raw unique-violation error is never exposed to the client.
-
-### Capacity planning
-
-Per-attempt collision probability is approximately `n / 62^7`, where `n` is the number of existing links.
-
-| Existing links | Collision chance per attempt | Expected behavior |
+| Occupied codes | Collision probability | Approximate creates per retry |
 | --- | --- | --- |
-| 1 million | ~0.00003% | Effectively none |
-| 100 million | ~0.0028% | About 1 retry per 35,000 creates |
-| 1 billion | ~28% | Move to 8 characters or a key-generation service |
+| 1 million | 0.0000284% | 3,521,615 |
+| 100 million | 0.00284% | 35,216 |
+| 1 billion | 0.0284% | 3,522 |
 
-At 1 billion links, switch to 8 characters (`62^8 ≈ 2.18 × 10^14`) or a dedicated key-generation service (KGS). Both are described in ADR 0003.
+The probability of *any* collision over many allocations is much higher (birthday effect); retries are required from day one. At one million allocations, that probability is about 13.2%. This is not namespace exhaustion.
+
+For enumeration, a guess hits *any* occupied code with probability `n / 62^7`, not `1 / 62^7`. Never market random links as private. Restrict sensitive content at the destination; protect management with the separate 256-bit token.
+
+Review code length when measured retries exceed 0.1%, or abuse analysis warrants more entropy; one billion rows alone does not require a KGS. Moving future generated codes to 8 characters can preserve all existing codes. A database sequence could allocate an ID in the same insert, but publicly encoding it would reveal ordering and aid enumeration.
 
 ## Custom aliases
-
-Custom aliases are user-chosen codes such as `launch` or `system-design`.
 
 | Rule | Value |
 | --- | --- |
 | Length | 3–32 characters |
-| Alphabet | Lowercase `a-z`, digits `0-9`, `-`, `_` |
-| Boundaries | Must start and end with a letter or digit |
-| Regex | `^[a-z0-9](?:[a-z0-9_-]{1,30}[a-z0-9])?$` |
-| Reserved words | Rejected; see below |
-| Case | Must be supplied lowercase; uppercase is rejected rather than silently changed |
-| Reuse | Never reused, even after delete |
+| Grammar | `^[a-z0-9][a-z0-9_-]{1,30}[a-z0-9]$` |
+| Case | Lowercase only; reject uppercase rather than changing it |
+| Ownership | Same unique namespace as generated codes |
+| Reuse | Never, including deleted or expired links |
 
-Custom aliases share the `urls.short_code` namespace with generated codes. A generated code that happens to match an existing alias is treated as a collision and retried.
-
-### Reserved aliases
+Reserved path segments (case-insensitive comparison):
 
 ```text
 api, health, ready, docs, redoc, openapi.json, admin, login, logout, signup,
-static, assets, favicon.ico, robots.txt, sitemap.xml, well-known, internal,
-metrics, _next, graphql
+static, assets, favicon.ico, robots.txt, sitemap.xml, .well-known, well-known,
+internal, metrics, _next, graphql
 ```
 
-Keep this list in one code-owned module and expose it to tests. New top-level routes must add their first path segment here before deployment.
+Some reserved segments already fail the alias grammar. Keep them in the route policy nonetheless. Register fixed routes before `/{code}` and apply reserved checks to both allocation paths.
 
-## URL validation and normalization
+## Destination validation
 
-Validation happens before code allocation.
+The backend owns canonical validation. The browser repeats it only for user feedback.
 
-**MUST**
+- Accept absolute `http`/`https` URLs only, maximum 8192 characters **after serialization**, within the 64 KiB JSON body limit.
+- Reject userinfo, missing hosts, raw control characters (including CR/LF), backslashes, and outer whitespace. The UI may visibly trim before submission.
+- Normalize scheme/host case, IDNA hostname encoding, and default ports. Preserve path case, query ordering, and fragment semantics; test signed URLs to avoid breaking them.
+- Reject loopback, private, link-local, multicast, unspecified, and reserved IP literals, including IPv4-mapped IPv6 and ambiguous noncanonical numeric IP spellings.
+- Reject `localhost`, its subdomains, and `.local`/`.internal` names; normalize trailing dots before hostname checks.
+- Reject targets on the configured redirect/API hosts to avoid self-shortening loops. Other redirect chains are not crawled.
+- Do not resolve DNS or fetch destinations in v1. Arbitrary public-looking hostnames may later resolve to private addresses: syntactic filtering is abuse reduction, **not DNS-rebinding protection or a malware verdict**.
 
-- Accept only absolute `http` and `https` URLs.
-- Reject credentials in the authority (`https://user:pass@host`).
-- Reject control characters and leading/trailing whitespace (trim outer whitespace).
-- Reject empty hosts.
-- Enforce a maximum length of 8192 characters.
-- Reject IP literals and hostnames that resolve to private, loopback, link-local, or reserved ranges by default (`ALLOW_PRIVATE_TARGETS=false`), including `localhost`, `.local`, and `.internal`.
-- Normalize the scheme and host to lowercase and remove default ports.
+A future preview/scanner must validate every resolved address and redirect hop, constrain egress, and enforce response/time/size limits. That is a separate security review, not a reason to add DNS/network work to v1 creation.
 
-**MAY**
+## Link state and redirect semantics
 
-- Preserve path case, query string order, and fragment exactly.
-- Store the IDNA/punycode form of internationalized hostnames.
+Evaluate current/cached state in this order:
 
-**MUST NOT**
+1. Missing, deleted, blocked, or manually inactive → `404`.
+2. Otherwise expired (`expires_at <= now`) → `410`.
+3. Otherwise → `302` with `Location`, `Cache-Control: no-store`, and `Referrer-Policy: no-referrer`.
 
-- Fetch the destination in v1. No previews, screenshots, or metadata extraction.
-- Rewrite the destination beyond the normalization above.
-- Accept `javascript:`, `data:`, `file:`, `ftp:`, or other schemes.
+Expiry is independent of active state; cleanup MUST NOT turn expired rows inactive and silently change `410` to `404`. Future expiry is at most five years away; `null` clears expiry. Authorized management can inspect or extend an expired link.
 
-The client may prepend `https://` when a user omits the scheme. The API does not guess; it rejects a scheme-less value with `400 invalid_url`.
-
-## Expiry semantics
-
-- Omitted or `null` means the link does not expire.
-- `expires_at` must be in the future and at most 5 years ahead.
-- Expiry is enforced on every redirect, even when a cached entry exists.
-- Expired links return `410 Gone`; they are not deleted immediately.
-- A daily cleanup may mark long-expired links inactive after a grace period, but the alias stays reserved.
-- Updating `expires_at` invalidates the cache.
+Implement `HEAD /{code}` explicitly: same status and headers as GET, empty body, **no click event**. Invalid codes must never fall through to the frontend SPA. Error responses also use `no-store` so a missing code is not cached by clients before creation.
 
 ## Management tokens
 
-Every link gets an independent token at creation.
+Use `secrets.token_urlsafe(32)` and a constant-time comparison of HMAC-SHA256 digests. Store a hash version alongside the digest; current/previous peppers allow controlled rotation without invalidating everyone at once. Tokens authorize a single link, not a user or a listing endpoint.
 
-| Property | Value |
-| --- | --- |
-| Raw token | 32 random bytes, URL-safe base64 (`secrets.token_urlsafe(32)`) |
-| Entropy | 256 bits |
-| Storage | `HMAC-SHA256(MANAGEMENT_TOKEN_PEPPER, token)` as 32 bytes |
-| Returned | Once, in the `201` create response |
-| Transport | `X-Management-Token` header over HTTPS |
-| Comparison | Constant-time compare after lookup |
-| Logging | Never logged, never included in URLs, never stored client-side by the server |
+The token is revealed during creation and replayed only for that same creation key within 24 hours. This requires the short-lived encrypted replay record in [data-model.md](data-model.md); it is not hash-only storage across the whole system. Tokens, replay keys, and decrypted responses never enter logs, URLs, metrics, or traces.
 
-The token authorizes one link. It does not identify a user and cannot list other links. Future account auth is orthogonal: an authenticated owner may manage links without a per-link token.
+## Cache contract and tests
 
-## Redirect lookup
+[Cache policy](caching-and-scale.md) is authoritative: no negative cache in v1, positive cache age at most 60 seconds, best-effort invalidation after mutation. This is bounded staleness, not immediate revocation.
 
-```sql
-SELECT id, long_url, is_active, expires_at, deleted_at
-FROM urls
-WHERE short_code = $1;
-```
-
-- The unique index makes this a single index lookup.
-- The cached representation carries `is_active` and `expires_at`, so expiry can be evaluated without a database round trip.
-- A missing row is negatively cached for 30 seconds to absorb scans without letting alias creation be invisible for long.
-- The code is case-sensitive; `/Sysdesign` and `/sysdesign` are different paths. Custom aliases are always lowercase to reduce confusion.
-
-## Future extensions
-
-- **QR codes** render the short URL; no schema change.
-- **Custom domains** add a `domains` table and make uniqueness `(domain_id, short_code)`.
-- **Bulk creation** reuses the same allocation path with a batch transaction and per-item results.
-- **Link-in-bio pages** become a new target type rather than a special code format.
-- **Accounts** populate `owner_id` and add listing indexes; the token model remains valid for anonymous links.
-
-## Test checklist
-
-- Generated codes are 7 Base62 characters and pass the database check.
-- All 62 symbols are reachable in distribution tests.
-- Collisions retry and eventually succeed; exhaustion is mapped to a controlled error.
-- Alias conflicts return `409` and do not consume a generated code.
-- Reserved aliases are rejected in every case.
-- Uppercase aliases are rejected.
-- Private targets are rejected by default and allowed only when configured.
-- Token hashes are stable, 32 bytes, and never equal the raw token.
-- Expired cached links are not redirected.
+Required tests: exact alias boundaries (1/2/3/32/33 characters), reserved generated codes, forced collisions, simultaneous creates, expiry at the boundary, disable/delete precedence, HEAD without analytics, IPv4/IPv6/IDNA/control-character validation, and token replay/rotation. Use deterministic randomness in tests rather than flaky distribution assertions.

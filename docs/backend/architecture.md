@@ -1,284 +1,129 @@
 # Backend Architecture
 
-Status: target design · Related: [API](api.md) · [Data model](data-model.md) · [Deployment](deployment.md)
+Status: target design, not implemented · [Plan](../README.md#implementation-plan) · [API](api.md) · [Data model](data-model.md)
 
-## Responsibilities
+## Shape and boundaries
 
-The backend owns:
-
-- Validating and normalizing destination URLs.
-- Allocating short codes and custom aliases.
-- Persisting links and their lifecycle state.
-- Serving fast redirects.
-- Authenticating anonymous management tokens.
-- Capturing click events and producing analytics.
-- Enforcing rate limits and abuse controls.
-- Exposing the versioned REST API consumed by the web app.
-
-It does not render the web app, store files, or fetch destination URLs in v1.
-
-## Architectural style
-
-A modular monolith deployed as one Vercel Function. The layers are separated by dependency direction, not by network boundaries.
+Use a **modular monolith**, one FastAPI deployment and one Neon database, not microservices. Vercel handles instance scaling; durable state lives outside the process. Redirects and management share deployment resources in v1, so resource budgets and internal-worker timeouts matter.
 
 ```mermaid
-flowchart TB
-    subgraph Transport
-        routes[FastAPI routes<br/>schemas + status codes]
-        middleware[Request ID · logging · CORS · errors]
-    end
-    subgraph Application
-        linkSvc[LinkService]
-        redirectSvc[RedirectService]
-        analyticsSvc[AnalyticsService]
-    end
-    subgraph Domain
-        entities[Entities · value objects · exceptions]
-        codegen[CodeGenerator]
-    end
-    subgraph Infrastructure
-        repos[Repositories<br/>SQLAlchemy]
-        cache[Redis cache + rate limiter]
-        stream[Redis Stream producer]
-        db[(Postgres)]
-    end
-
-    routes --> linkSvc
-    routes --> redirectSvc
-    routes --> analyticsSvc
-    linkSvc --> entities
-    linkSvc --> codegen
-    linkSvc --> repos
-    linkSvc --> cache
-    redirectSvc --> cache
-    redirectSvc --> repos
-    redirectSvc --> stream
-    analyticsSvc --> repos
-    repos --> db
+flowchart LR
+    HTTP[FastAPI routes and schemas] --> Services[Link / Redirect / Analytics services]
+    Services --> SQL[SQLAlchemy repositories]
+    Services --> Cache[Redis cache and limiter]
+    Services --> Stream[Redis event producer]
+    SQL --> PG[(Neon)]
+    Cache --> Redis[(Upstash)]
+    Stream --> Redis
+    Job[Authenticated scheduled drain] --> Worker[Bounded ingestion worker]
+    Worker --> Redis
+    Worker --> PG
 ```
 
-### Layer rules
-
-| Layer | May depend on | Must not contain |
+| Layer | Owns | Avoid |
 | --- | --- | --- |
-| `api/` | schemas, services, FastAPI | SQL, Redis commands, business rules |
-| `services/` | domain, repository protocols, cache/stream interfaces | FastAPI imports, ORM query details |
-| `domain/` | standard library only | I/O, frameworks, database models |
-| `repositories/` | SQLAlchemy, domain entities | HTTP status codes, cache policy |
-| `cache/`, `db/` | clients and config | Business decisions |
+| Routes/schemas | HTTP validation, status mapping, auth headers, request IDs | SQL or Redis commands |
+| Services | Use cases, lifecycle rules, transaction intent | FastAPI response objects |
+| Repositories | Parameterized queries, locking, persistence | HTTP errors or cache policy |
+| Adapters | Redis operations, client lifetime, timeouts | Product decisions |
 
-Dependencies point inward. Services depend on protocols; concrete adapters are injected by FastAPI dependencies. This keeps the hot redirect logic testable without a running Postgres or Redis.
+Keep dependencies explicit with FastAPI dependencies; one database session per request/worker transaction, not a global session. Engines and Redis clients may be reused within an instance/event loop. A small injectable clock and code generator enable deterministic tests. Add protocols only at actual I/O seams; do not pre-create empty domain layers, generic repository frameworks, or future account modules.
 
-## Target package layout
+## Incremental layout
 
 ```text
-backend/
-├── pyproject.toml
-├── uv.lock
-├── .env.example
-├── alembic.ini
-├── src/backend/
-│   ├── main.py                  # create_app, lifespan, middleware
-│   ├── api/
-│   │   ├── dependencies.py      # session, clients, service wiring
-│   │   ├── errors.py            # Problem Details handlers
-│   │   ├── middleware.py        # request ID, access logs
-│   │   ├── router.py            # /api/v1 composition
-│   │   └── routes/
-│   │       ├── health.py        # /health, /ready
-│   │       ├── links.py         # create, read, update, delete
-│   │       ├── redirects.py     # GET /{code}
-│   │       ├── analytics.py     # per-link analytics
-│   │       └── internal.py      # cron-authenticated drain
-│   ├── core/
-│   │   ├── config.py            # typed settings
-│   │   ├── logging.py           # JSON formatter
-│   │   ├── security.py          # token generation + hashing
-│   │   └── time.py              # clock abstraction
-│   ├── domain/
-│   │   ├── entities.py
-│   │   ├── exceptions.py
-│   │   └── value_objects.py     # ShortCode, LongUrl, Alias
-│   ├── services/
-│   │   ├── link_service.py
-│   │   ├── redirect_service.py
-│   │   └── analytics_service.py
-│   ├── repositories/
-│   │   ├── protocols.py
-│   │   ├── link_repository.py
-│   │   └── click_repository.py
-│   ├── db/
-│   │   ├── session.py
-│   │   ├── models.py
-│   │   └── migrations/
-│   ├── cache/
-│   │   ├── redis.py
-│   │   └── keys.py
-│   └── workers/
-│       └── analytics_drain.py
-└── tests/
-    ├── unit/
-    ├── integration/
-    └── conftest.py
+src/backend/
+  main.py
+  core/config.py
+  core/security.py
+  api/dependencies.py
+  api/errors.py
+  api/router.py
+  api/routes/{health,links,redirects,analytics,internal}.py
+  services/{links,redirects,analytics}.py
+  repositories/{links,analytics}.py
+  db/{session,models}.py
+  cache/{redis,keys}.py
+  workers/analytics_drain.py
 ```
 
-The current scaffold has `main.py`, `api/routes/health.py`, and `core/config.py`. The remaining modules are added as each milestone lands.
+Only `main.py`, configuration, router and health route exist today. Add modules with their feature, not in advance. Alembic migrations and integration tests accompany the first persistence milestone.
 
-## Core components
+## Create path
 
-### `LinkService`
+1. Enforce body limit and fail-closed create limits; validate URL, alias and required random idempotency key.
+2. In **one Postgres transaction**, reserve the hashed key, generate a code/token, insert the link, and store the AEAD-encrypted replay response.
+3. A duplicate key waits within a bounded deadline: return the original response for identical input, `409` for a mismatch/in-progress transaction. Unique-code conflicts retry only generated codes.
+4. Commit before returning `201`. Do not use Redis as a second authoritative replay store; a DB commit followed by a failed Redis write loses the original token and breaks retry safety.
 
-Use cases: create, get, update, soft-delete, verify management token.
+[API](api.md#idempotent-creation) and [data model](data-model.md) define replay TTL, encryption, concurrency and crash behavior.
 
-- Validates and normalizes input.
-- Allocates a generated or custom code.
-- Hashes the management token before persistence.
-- Retries generated-code collisions.
-- Invalidates the redirect cache after commits.
-- Never returns the raw token after creation.
-
-### `RedirectService`
-
-The hot path. Its contract is: return a destination or raise a domain error, without doing analytics work synchronously.
-
-- Checks the rate limiter.
-- Reads `url:{code}` from Redis.
-- Falls back to Postgres on a miss and repopulates the cache.
-- Rejects inactive, deleted, or expired links.
-- Appends a click event to a Redis Stream as a best-effort side effect.
-- Returns the target so the route can emit `302`.
-
-### `AnalyticsService`
-
-- Verifies the management token.
-- Reads daily rollups for historical ranges.
-- Reads raw events for the current day and optional breakdowns.
-- Applies retention and date-range limits.
-
-### `CodeGenerator`
-
-Pure component with injected randomness. Generates 7-character Base62 codes and validates custom aliases. See [short-links.md](short-links.md).
-
-### `RateLimiter`
-
-Redis-backed counter keyed by scope, hashed client identifier, and time window. It returns a decision plus reset metadata; the route maps that to headers and `429`.
-
-### `Clock`
-
-Injected UTC clock. Expiry and analytics code use it instead of calling `datetime.now()` directly, which makes time-dependent tests deterministic.
-
-## Request lifecycle
-
-### Create a link
+## Redirect path
 
 ```mermaid
 sequenceDiagram
-    participant C as Client
-    participant R as Route
-    participant S as LinkService
-    participant G as CodeGenerator
+    participant C as Browser
+    participant A as FastAPI
+    participant R as Redis
     participant D as Postgres
-    C->>R: POST /api/v1/links
-    R->>R: validate schema + rate limit
-    R->>S: create(long_url, alias?, expires_at?)
-    S->>G: allocate code
-    S->>D: INSERT ... ON CONFLICT short_code DO NOTHING
-    alt collision or alias taken
-        D-->>S: conflict
-        S->>S: retry generated code or raise AliasTaken
+    C->>A: GET /code
+    A->>R: Rate-limit decision
+    A->>R: GET cached target
+    alt miss or Redis failure
+        A->>D: Indexed lookup with deadline
+        D-->>A: Link state
+        A->>R: Best-effort cache fill (if healthy)
     end
-    S->>D: commit
-    S-->>R: link + raw management token
-    R-->>C: 201 + Location
+    A->>A: Evaluate deleted/blocked/inactive, then expiry
+    A->>R: Bounded best-effort XADD (GET only)
+    A-->>C: 302, Location, no-store
 ```
 
-The link row and its token hash are written in one transaction. Cache does not need warming on create; the first redirect is a cache miss.
+The enqueue is **awaited before the response**; it consumes latency even though database ingestion is asynchronous. It gets a 50 ms deadline initially, no hot-path retry, and never converts a valid redirect to failure. Do not schedule untracked background tasks and assume a serverless process survives the response.
 
-### Follow a link
+HEAD follows the same resolution without capture. Cache hits carry their own expiry and absolute cache deadline. No negative cache in v1. Positive-cache reads may reflect old state for at most the documented 60-second cache-age window; post-commit invalidation improves freshness but is not a distributed transaction.
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant R as Route
-    participant L as RateLimiter
-    participant S as RedirectService
-    participant K as Redis
-    participant D as Postgres
-    C->>R: GET /{code}
-    R->>L: allow(redirect, hashed_ip)
-    alt over limit
-        L-->>R: denied
-        R-->>C: 429 + Retry-After
-    else allowed
-        R->>S: resolve(code)
-        S->>K: GET url:{code}
-        alt cache hit
-            K-->>S: target
-        else cache miss
-            S->>D: SELECT active, unexpired link
-            D-->>S: row or none
-            S->>K: SETEX target / negative marker
-        end
-        S->>K: XADD clicks:stream
-        S-->>R: long_url
-        R-->>C: 302 Location + no-store
-    end
-```
+Urgent abuse revocation requires an edge deny rule across both backend hosts before the database block is acknowledged operationally. Cached redirects are not a strict revocation mechanism. See [caching](caching-and-scale.md).
 
-Steps are ordered so that neither analytics nor cache writes can turn a valid redirect into an error.
+## Management and analytics
 
-### Drain analytics
+- Authenticate on the authoritative DB row, never a cached target. A supplied invalid token returns `401`; never silently fall back to public metadata.
+- Authorized GET may inspect inactive/expired links. Deleted/blocked links are `404`; repeat DELETE with a valid token is the sole deleted-row exception.
+- PATCH fields are absolute values; omitted and null expiry differ. Operator `is_blocked` is never writable by public API clients.
+- Analytics reads totals and daily series from rollups and rich dimensions from retained raw events. V1 includes country/device/referrer-origin breakdowns, not unique visitors.
+- Query bounds use UTC dates and `[from, to)` semantics. Auth-scoped browser caches must be cleared when a token changes or is forgotten.
 
-The internal route is called by a scheduler, authenticated with `CRON_SECRET`, and is idempotent. It reads a bounded batch from the stream, inserts events with `ON CONFLICT (event_id) DO NOTHING`, recomputes affected daily rollups, and acknowledges the stream entries. Details in [analytics.md](analytics.md).
+## Ingestion and consistency
 
-## Transactions and consistency
+The scheduler invokes a bounded drain. Consumer-group delivery may duplicate or overlap. Insert raw events with a unique `event_id`, obtain newly inserted rows with `RETURNING`, and atomically increment rollups from **those rows only**, in the same database transaction. ACK and delete stream entries only after commit. Locks may reduce redundant workers but cannot be the correctness boundary.
 
-- **Create**: single transaction; unique index is the source of truth for code ownership.
-- **Update/delete**: transaction first, then best-effort cache invalidation. If invalidation fails, the cached entry expires by TTL; mutations also bump `updated_at` for auditing.
-- **Redirect read**: no transaction spans the cache and database. The database row is authoritative; cached entries carry `is_active` and `expires_at` and are re-checked on read.
-- **Analytics ingestion**: at-least-once delivery from the stream; `event_id` uniqueness plus idempotent rollup recomputation prevents double counting.
-- **Idempotent create**: an optional `Idempotency-Key` stores the request fingerprint and response in Redis for 24 hours.
+Capture is best-effort: Redis failure/overflow may lose events. Accepted, retained events receive retryable at-least-once processing; the database makes repeats idempotent. Do not describe this as end-to-end exactly-once or lossless analytics.
 
-## Failure policy
+## Failure policies
 
-| Dependency failure | Redirect | Create / manage | Analytics |
-| --- | --- | --- | --- |
-| Redis unavailable | Fall back to Postgres; log and alert | Allow if rate limiter fails open; log and alert | Drop event, log metric |
-| Postgres unavailable | Serve cache hit if possible; otherwise `503` | `503` | Pause drain; retry next run |
-| Stream append fails | Redirect still succeeds | n/a | Event lost; alert on rate |
-| Cron missed | No user impact | No user impact | Backlog; drain catches up |
-
-Fail-open behavior applies only to rate limiting and click capture. Authorization and persistence always fail closed.
-
-## Configuration
-
-All settings are environment variables with the `URLSHORTNER_` prefix, parsed by `pydantic-settings`. Required in production:
-
-- `DATABASE_URL` — Neon pooled async URL.
-- `REDIS_URL` — Upstash TLS URL.
-- `PUBLIC_BASE_URL` — public short-link origin.
-- `CORS_ORIGINS` — JSON array of allowed web origins.
-- `MANAGEMENT_TOKEN_PEPPER` — server-side HMAC pepper for token hashes.
-- `ANALYTICS_IP_SALT` — salt used for hashed visitor identifiers.
-- `CRON_SECRET` — bearer token for internal scheduled routes.
-
-Debug mode and interactive API docs are disabled when `ENVIRONMENT=production`.
-
-## Testing strategy
-
-| Level | Scope | Tools |
+| Failure | Redirect | Create / management / analytics |
 | --- | --- | --- |
-| Unit | Code generation, validation, token hashing, cache-key logic, rate-limit decisions | pytest, fakes |
-| Integration | Repositories, migrations, Redis cache, stream drain, API routes | pytest, httpx ASGITransport, Testcontainers or Docker Compose |
-| Contract | OpenAPI schema snapshot; generated frontend types | FastAPI schema dump, CI diff |
-| Load | Redirect p95, cache hit ratio, error rate under sustained load | k6 |
+| Redis timeout | Fail-open limiter; bounded DB fallback | Fail-closed limiter, `503` |
+| Postgres unavailable | Valid unexpired cache hit only; otherwise `503` | `503`, never bypass token verification |
+| Event enqueue timeout | Redirect succeeds; record potential loss | No synchronous analytics fallback |
+| Worker DB failure | No immediate redirect impact | Leave events pending for retry |
+| Missed schedule | Redirect remains available | Expose stale analytics; alert on oldest unprocessed event |
 
-CI must run `ruff check`, `ruff format --check`, and `pytest`. Integration tests use a disposable Postgres and Redis; they do not touch preview or production data.
+DB fallback has a short pool wait and query deadline; saturation returns controlled `503` instead of exhausting connections. Small per-instance backoff/circuit state may suppress repeated failed Redis calls, but shared security decisions must not depend on it.
 
-## Design constraints from Vercel
+## Configuration and deployment boundary
 
-- Instances are ephemeral: no in-process caches that are required for correctness.
-- Connections must be pooled conservatively; Neon's pooler absorbs function concurrency.
-- Long work belongs in the scheduled drain, not in the request path (cleanup is capped at 500 ms on shutdown).
-- The whole app is one function bundle, so keep runtime dependencies small.
-- `tool.vercel.entrypoint` points at `backend.main:app`; see [deployment.md](deployment.md).
+Application settings use `URLSHORTNER_`; platform **`CRON_SECRET` is the exception** and must be explicitly mapped in settings. Use distinct token-pepper, replay-encryption, and rate-limit HMAC keys; no permanent IP hash is required for analytics.
+
+Build OpenAPI offline without requiring database credentials or connecting to dependencies. Validate required production secrets at runtime startup. Production must reject debug mode, disable interactive docs, and use exact noncredentialed CORS; these are targets, not current scaffold behavior.
+
+One chosen function region must match Neon/Upstash locations. Current package entrypoint is `backend.main:app`; verify Vercel's resolved source file in a preview before treating deployment as supported. Do not run migrations during import, request handling or cold start.
+
+## Production acceptance
+
+- Unit tests: URL/alias boundaries, time, token versions, error mapping.
+- Real Postgres/Redis integration tests: uniqueness, concurrent replay, cache refill/mutation races, duplicate and overlapping drains, bounded resource failures.
+- Contract tests: OpenAPI generated types and documented errors/headers.
+- Browser tests: create/retry, manual token recovery, opt-in storage, auth cache clearing, rich analytics and UTC dates.
+- Authorized isolated load tests: measured RPS/cold-start/command costs, queue drain throughput, connection headroom. Never load-test third-party destinations or unapproved production environments.
+- Release gates: dependency audits, privacy-safe logs, erasure/takedown procedure, backup restore and rollback drill. See the [implementation plan](../README.md#implementation-plan).

@@ -1,158 +1,85 @@
 # Security and Abuse Prevention
 
-Status: target design · Related: [API](api.md) · [Deployment](deployment.md)
+Status: target design; release controls are not yet implemented · [API](api.md) · [Deployment](deployment.md)
 
 ## Threat model
 
-| Threat | Impact | Primary mitigation | Residual risk |
-| --- | --- | --- | --- |
-| Phishing or malware distribution through short links | Reputation, user harm | Rate limits, URL validation, abuse reporting, Safe Browsing integration later | Shorteners are attractive to abusers; monitoring is required |
-| Enumeration of links | Privacy, scraping | Random 7-char codes, no public listing, rate limits, negative caching | Codes can be guessed at a low rate; 62^7 space makes it impractical |
-| Denial of service | Outage, cost | Vercel WAF/firewall, per-scope rate limits, timeouts, bounded request sizes | Large volumetric attacks are handled upstream |
-| Management token theft | Link takeover | 256-bit tokens, HTTPS only, hash at rest, no logging, rate limits | Client storage (localStorage) is exposed to XSS |
-| Open-redirect misuse | Users redirected to malicious sites | Only `http`/`https`, no credentials, private-target blocking, abuse controls | The product is intentionally an open redirector |
-| SQL injection | Data breach | SQLAlchemy parameterized queries, no string-built SQL | Low |
-| XSS through URLs or aliases | Session/token theft | Output encoding, no `innerHTML`, strict CSP on the web app | Low |
-| Cache poisoning | Redirect to attacker target | Cache keys from validated codes; values only from Postgres | Low |
-| SSRF (future previews) | Internal network access | Do not fetch destinations in v1; block private ranges if fetching is added | Future feature must re-review |
-| Secret leakage | Full compromise | Vercel env vars, least-privilege roles, no secrets in logs or client bundle | Operational discipline |
-| Supply-chain compromise | Code execution | Lockfiles, dependency review, `pip-audit`, Dependabot | Ecosystem risk |
-
-## URL validation
-
-The API is an open redirector by design, but it MUST only redirect to well-formed public web URLs.
-
-**MUST**
-
-- Allow only `http` and `https`.
-- Reject credentials in the URL authority.
-- Reject control characters, embedded NULs, and whitespace around the value.
-- Reject private, loopback, link-local, and reserved IP literals by default.
-- Reject `.localhost`, `.local`, and `.internal` hostnames by default.
-- Enforce 8192 characters maximum.
-- Normalize scheme and host casing; remove default ports.
-- Reject unsupported schemes before any code allocation.
-
-**SHOULD**
-
-- Reject URLs whose host is a bare IP literal unless the environment explicitly allows it.
-- Log only the short code and error code, never the full rejected URL.
-- Re-run validation on update, not only create.
-
-Private-target blocking is controlled by `ALLOW_PRIVATE_TARGETS`, default `false`. Enabling it is intended only for internal deployments and must never be enabled on the public service.
-
-## Abuse controls
-
-1. **Rate limits** on create, redirect, metadata, and analytics (see [caching-and-scale.md](caching-and-scale.md)).
-2. **Random codes** to resist enumeration.
-3. **No public listing** of links or aliases.
-4. **Reserved aliases** to protect service routes.
-5. **Vercel WAF/firewall** for volumetric and signature-based attacks.
-6. **Abuse contact** in `/.well-known/security.txt` and the site footer.
-7. **Blocklist** maintained operationally; a future `is_blocked` status can quarantine destinations.
-8. **Safe Browsing** integration as an asynchronous check after creation, with quarantine on a hit.
-
-A blocked or quarantined link returns `410` without redirecting. Blocking must be possible without a deploy.
-
-### What we deliberately do not do in v1
-
-- Fetch or render destination pages. This avoids SSRF and preview-based data leakage.
-- Scan every destination synchronously. It would add latency and an external dependency to creation.
-- Require accounts for creation. Abuse is managed with rate limits and monitoring instead.
-
-## Management tokens
-
-- 256-bit entropy via `secrets.token_urlsafe(32)`.
-- Stored as `HMAC-SHA256(pepper, token)`; the pepper is a Vercel secret.
-- Compared with `hmac.compare_digest` after lookup.
-- Sent only over HTTPS in the `X-Management-Token` header.
-- Never placed in URLs, logs, analytics, or error responses.
-- Returned once; there is no recovery mechanism in v1.
-- Rate-limited through the analytics/metadata scopes to slow guessing.
-- A future account system can rotate or revoke tokens; v1 has no rotation endpoint.
-
-**Pepper rotation**: rotating `MANAGEMENT_TOKEN_PEPPER` invalidates every existing token. To rotate safely, store a `token_hash_version` on `urls`, keep the previous pepper during a transition, and re-hash on next successful use. V1 should treat pepper rotation as a breaking maintenance operation.
-
-## API hardening
-
-- **CORS**: exact allowlist, no `*`, no credentials in v1.
-- **Body limits**: reject request bodies above 16 KB at the edge/application boundary.
-- **Timeouts**: Redis 200 ms, redirect DB 2 s, create DB 5 s, total function budget below the Vercel limit.
-- **Error responses**: Problem Details with `request_id`; no stack traces, SQL, internal hostnames, or dependency details.
-- **Validation**: Pydantic models for every input; query parameter ranges bounded.
-- **Methods**: explicit methods per route; no catch-all handlers.
-- **Docs**: `/docs` and `/redoc` disabled when `ENVIRONMENT=production`.
-- **OpenAPI**: schema is public; it contains no secrets.
-- **Headers** on API responses:
-  - `X-Content-Type-Options: nosniff`
-  - `Strict-Transport-Security: max-age=63072000; includeSubDomains; preload`
-  - `Referrer-Policy: no-referrer` on redirects
-  - `X-Frame-Options: DENY` or CSP `frame-ancestors 'none'` on HTML error pages
-  - `Permissions-Policy: geolocation=(), microphone=(), camera=()`
-- **Redirect responses**: `X-Robots-Tag: noindex, nofollow` and a minimal body.
-- **Cron endpoint**: bearer secret, constant-time comparison, no data returned beyond counts.
-
-## Data protection
-
-- **In transit**: HTTPS everywhere; TLS to Neon and Upstash.
-- **At rest**: Neon and Upstash encryption; no application-level encryption in v1.
-- **PII minimization**: no raw IPs, no cookies, referrer query strings stripped, country-level geo only.
-- **Logs**: no raw tokens, no long URLs, no IP addresses. Request logs include short codes and status codes only.
-- **Retention**: raw clicks 90 days, rollups 2 years, idempotency responses 24 hours.
-- **Deletion**: soft delete in v1; a future account-level deletion flow hard-deletes and cascades clicks.
-
-## Secrets management
-
-| Secret | Purpose | Rotation |
+| Threat | Control | Remaining limitation |
 | --- | --- | --- |
-| `DATABASE_URL` | Neon pooled connection | On credential compromise; Neon supports role rotation |
-| `REDIS_URL` / Upstash token | Cache, limits, stream | On compromise; deploy new token |
-| `MANAGEMENT_TOKEN_PEPPER` | Token hashing | Breaking; requires versioned hashes |
-| `ANALYTICS_IP_SALT` | IP hashing | Quarterly; correlation resets |
-| `CRON_SECRET` | Internal drain auth | Quarterly or on compromise |
-| `SENTRY_DSN` (optional) | Error reporting | On compromise |
+| Malicious destinations | Scheme/authority validation, create limits, reporting and operator block | Validation is not malware detection |
+| Enumeration | Random codes, limits, no public listing | Short links are public; randomness is not authorization |
+| Link takeover | Per-link 256-bit token, HMAC at rest, HTTPS, no-store | Browser XSS can steal accessible capabilities |
+| Retry creates duplicate/unmanageable link | Same-transaction Postgres replay record | Replay key is also a secret capability, valid 24 hours |
+| Cache serves deleted/malicious target | 60-second max age, invalidation, edge deny for urgent takedown | Invalidation alone is not strict revocation |
+| Database injection | Parameterized SQL, narrow DML role | Operators and migration credentials remain sensitive |
+| SSRF from future previews | No server-side destination fetching in v1 | Future fetcher needs DNS/egress/hop controls |
+| Resource exhaustion | Edge controls, atomic limits, size/time/concurrency budgets | Provider plan limits and abuse costs still require monitoring |
+| Secret/PII telemetry leak | Redaction at source, sanitized exception handling | Vendor logs/backups need separate retention review |
 
-Rules:
+## URL boundary
 
-- Secrets live only in Vercel environment variables, never in the repository.
-- `.env` files are gitignored; `.env.example` contains placeholders only.
-- Preview and production use separate credentials and databases.
-- Database application roles have DML only; migrations use a separate role.
-- Rotate any secret that appears in logs, screenshots, or a public artifact.
+[Short-link validation](short-links.md#destination-validation) is authoritative: HTTP(S) only, no credentials/control characters/backslashes, constrained size, normalized hosts, private/noncanonical IP rejection and local-name blocking. No DNS lookup or destination fetch in v1. Domains can change resolution; do not advertise DNS-rebinding prevention or a safety verdict.
 
-## Frontend security contract
+Reject self-shortening to configured API/redirect hosts. Preserve path/query semantics for signed URLs. Tests must cover IDNA, IPv4-mapped IPv6, trailing dots, numeric host variants and browser/parser disagreements. Client validation never replaces API validation.
 
-- The web app never receives database or Redis credentials.
-- `VITE_*` variables are public by definition; only the API base URL and public short domain are exposed.
-- Management tokens are stored client-side by explicit user action and are vulnerable to XSS. The frontend therefore enforces a strict CSP and never injects URLs as HTML. See [ui-and-a11y.md](../frontend/ui-and-a11y.md).
+## Anonymous capabilities
 
-## Secure development
+- Generate a token with 32 random bytes; use HMAC-SHA256 and constant-time digest comparisons.
+- Version token hashes from the first schema. Read a current/previous pepper map; rehash atomically on successful use during rotation. Do not treat pepper rotation as a casual way to revoke every user's access.
+- Require `X-Management-Token` over HTTPS; never put tokens in routes, query strings, browser history, query keys, logs or traces.
+- Validate tokens against Postgres for metadata with auth, mutations and analytics. Fail closed on DB/auth failures; never use a cached redirect payload for authorization.
+- Default frontend storage is memory. Explicit opt-in may remember on this device; show/reveal/copy during creation and warn that losing all copies loses management. A paste form restores possession, not a forgotten server secret.
+- No silent auto-save of credentials; storage failure cannot hide a successful response. Clear private query data on token replacement/rejection/forget, including cross-tab events.
 
-- `ruff` with security-relevant rules (`B` bandit subset) in CI.
-- `pip-audit` (or `uv audit` when available) on the lockfile.
-- Dependabot/Renovate for Python and Bun dependencies.
-- Integration tests for private-target rejection, token failures, rate limits, and expired links.
-- Fuzz tests for URL parsing and custom alias validation.
-- No `.env` or secret material in commits; secret scanning enabled on the repository.
-- Threat-model review before adding URL fetching, previews, accounts, or custom domains.
+### Replay storage exception
 
-## Incident response
+An idempotency key can replay a creation response including its token for 24 hours. Require random UUIDv4, redact it, store its digest only, and encrypt the complete replay response with AEAD and a separate versioned key. Commit replay and link in the same DB transaction. Encrypting the replay is an intentional exception to the link row's hash-only token storage.
 
-1. Identify the abuse vector from logs and metrics without exposing user data.
-2. Add a blocklist entry or tighten rate limits, ideally without a deploy.
-3. Rotate affected secrets if credential exposure is suspected.
-4. Notify stakeholders and, where required, affected users.
-5. Write a short post-incident note with detection, impact, and prevention.
+Enforce TTL on reads, purge rows in bounded jobs, and retire old replay keys after their live windows. Document backup retention; deleting a live row does not erase all backups. Keep old decryption keys only as long as needed for permitted replays. An exposed replay key can disclose a token even if no link-management call has occurred.
 
-## Security checklist for release
+## Abuse and urgent takedown
 
-- [ ] Private-target and scheme validation tests pass.
-- [ ] Reserved aliases cannot be created.
-- [ ] Management tokens are never logged or returned after creation.
-- [ ] CORS allowlist contains only known origins.
-- [ ] Rate limits are enabled on create and redirect.
-- [ ] Security headers are present on API and redirect responses.
-- [ ] `/docs` is disabled in production.
-- [ ] Production secrets differ from preview secrets.
-- [ ] Dependency audit is clean or exceptions are documented.
-- [ ] Abuse contact is published.
+- Fail closed for create, management and analytics when the shared limiter is unavailable. Redirect limits may fail open only with bounded DB fallback.
+- Apply rate limits to unauthenticated management attempts, not only successful token checks. Require global daily creation and per-code attempt caps at launch.
+- Trust only verified platform-overwritten IP metadata; arbitrary forwarded headers are attacker input. Per-IP budgets are not identity/authentication.
+- Publish reporting/security contact details before public creation opens. Do not publish placeholder contact addresses.
+- Provide an operator procedure using `is_blocked`, independent of `is_active`; the holder of a management token cannot unblock it.
+- For immediate malicious-code revocation, apply and verify a deny rule across every backend hostname, then commit `is_blocked` and invalidate. Without a suitable edge control, document up to 60 seconds of stale redirect risk or use authoritative DB checks; do not claim zero delay.
+- Maintain an auditable erasure procedure for destination/event data, retaining only a code tombstone where necessary to prevent reuse. Access, retention and backup expiry must be documented even without accounts.
+- Automated reputation scanning is deferred, not a release control already present.
+
+## HTTP and browser security
+
+- All API/private/redirect/error responses: `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`.
+- Redirects: `Referrer-Policy: no-referrer`; HTML errors escape output and prohibit framing.
+- Exact CORS origins with credentials disabled. Distinguish approved preview origins from arbitrary `*.vercel.app` deployments. CORS does not authenticate an API client.
+- Enforce a 64 KiB body cap while streaming input; return `413` before allocation. Validate schema lengths, unknown fields, date bounds and request IDs.
+- No debug mode or interactive docs in production. OpenAPI remains public; security never depends on hiding it.
+- Start HSTS only after HTTPS validation; `includeSubDomains` and preload require domain-owner review and must not be copied blindly.
+- The SPA uses a reviewed CSP, no unsafe HTML injection, no unapproved third-party scripts and `noopener noreferrer` for external links. Inline style allowance does not justify inline script execution.
+- Framework validation errors must remove raw `input` values before logging/responding; request bodies, destinations, auth/replay headers and cookies are always redacted.
+
+## Privacy and retention
+
+Rich analytics need event time, country, referrer origin, device category and bot classification—not persistent IP hashes. Raw IP is transient limiter input only; rate-limit HMAC keys expire and are not logged or correlated with analytics. Store no raw UA in Postgres and no referrer path/query/fragment anywhere in durable events.
+
+Stream UA is bounded and short-lived; malformed/dead-letter diagnostics contain only IDs/reasons. Raw events retain 90 UTC days, totals two years, replay responses 24 hours, redacted diagnostics at most seven days. Aggregate or pseudonymous data may still be personal data; hashing alone does not make information anonymous.
+
+Review destination URLs too: they can contain personal data or access credentials. Limit database/backup access, prohibit logging full targets, and define retention after deletion. Determine privacy notices, lawful basis and any GPC/consent obligations for the launch jurisdiction before collecting data. Do not assert that no cookies means no privacy obligations.
+
+## Secrets and software supply chain
+
+[Deployment](deployment.md#planned-environment-settings) defines exact names, including unprefixed `CRON_SECRET`. Separate runtime DML and migration DDL roles, isolated preview data, TLS certificate verification, versioned pepper/encryption keys and a dedicated limiter HMAC key. A telemetry DSN may be a public ingestion identifier; do not confuse it with privileged API credentials.
+
+Use frozen lockfile installs, dependency audits and secret scanning. Ruff `B` is **flake8-bugbear**, not Bandit; security rules use the `S` family and require an intentional configuration/test review. No lint rule substitutes for a threat model. The scaffold currently enables `E,F,I,UP,B`; additional tooling is planned, not already enabled.
+
+## Release security gates
+
+- [ ] URL/parser adversarial tests, reserved generated codes and HEAD no-event behavior.
+- [ ] Token isolation, invalid-token responses, encrypted replay concurrency/crash tests and key rotation.
+- [ ] No sensitive content in application/validation/access/error telemetry; vendor log settings reviewed.
+- [ ] Auth-cache clearing, storage failures, no-store, CSP and exact CORS verified in a browser.
+- [ ] Fail-closed creation/management and bounded fail-open redirect overload tests.
+- [ ] Operator takedown on all hosts, erasure request procedure and backup restore drill.
+- [ ] Retention and scheduler auth active before collecting production events.
+- [ ] Dependency/secret scans and privacy review complete; documented exceptions accepted explicitly.

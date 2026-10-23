@@ -1,79 +1,27 @@
 # ADR 0003: Random Base62 Codes with Collision Retry
 
-- Status: Accepted
-- Date: 2026-10-23
-
-## Context
-
-Every link needs a unique, short, URL-safe code. The service runs on stateless serverless functions, so there is no long-lived process to own an in-memory counter. The code should be hard to enumerate and should not require coordination between instances.
-
-Options:
-
-1. Random code with a database uniqueness check.
-2. Key-generation service (KGS) using a database sequence, encoded to Base62.
-3. Hash of the destination (deterministic).
-4. UUID or NanoID.
+Status: Accepted; numerical/capacity guidance corrected · Reviewed: 2026-10-23
 
 ## Decision
 
-Generate **7-character Base62 codes** using a CSPRNG (`secrets`), relying on a **unique database constraint** and a **bounded retry** on conflict.
+Use CSPRNG-generated 7-character case-sensitive Base62 codes, a case-sensitive unique Postgres constraint, and up to five generated-code retries. Custom aliases are lowercase, 3–32 characters, sharing the same namespace. Both allocation paths reject reserved service routes; codes are never recycled.
 
-- Alphabet: `0-9A-Za-z` (62 symbols).
-- Namespace: `62^7 ≈ 3.52 × 10^12`.
-- Retries: 5 attempts per create.
-- Custom aliases share the same namespace and are validated separately.
-- If scale approaches one billion links, move to 8 characters or a KGS.
+## Correctness and capacity
 
-## Consequences
+`62^7 = 3,521,614,606,208`, about 41.7 bits. Per-attempt collision probability at one billion occupied codes is **0.0284%**, not 28%. Birthday collisions can occur much earlier over a population of allocations; database retry logic is required from the first release.
 
-**Positive**
+The same occupancy ratio measures the chance of guessing *any* occupied generated code. Random codes reduce sequential enumeration but are not private capabilities. Management uses a separate 256-bit token.
 
-- No central counter or coordination; any function instance can generate a code.
-- Enumeration requires guessing in a 3.5-trillion space.
-- Codes are short and copy-friendly.
-- The database unique index is the single source of truth; no race-prone pre-check.
-- Custom aliases fit naturally into the same namespace.
+Review code length when measured collision retries exceed 0.1% or abuse analysis requires additional entropy; do not require a KGS just because the catalogue hits an arbitrary row count. Longer future generated codes can coexist with existing ones after a compatible validator/schema change.
 
-**Negative**
+## Alternatives and tradeoffs
 
-- Collisions are possible and require handling.
-- Codes are not deterministic; retrying a create without an idempotency key can produce a different link.
-- Case-sensitive codes can be mistyped (`a` vs `A`).
-- At extreme scale, the 7-character space becomes crowded.
+A sequence can return its ID in the same insert; it does not inherently require a second network call or imply an immediate bottleneck. However, directly Base62-encoding a sequence leaks ordering and eases enumeration. A separate KGS adds operational coordination with no demonstrated need.
 
-**Mitigations**
+Deterministically hashing destinations couples links with the same target and still requires collision handling. UUID text is longer than desired. NanoID with a chosen alphabet could implement a similar design; standard-library `secrets` is sufficient here. Reversible obfuscation is not authorization.
 
-- `ON CONFLICT`/unique-violation handling with a fresh code each retry.
-- `Idempotency-Key` on create prevents accidental duplicates.
-- Custom aliases are lowercase and validated; generated codes are copied, not typed.
-- Capacity thresholds and a documented 8-character/KGS migration.
-
-## Why not deterministic hashing?
-
-Hashing the destination would make the same URL produce the same code, which leaks that two links share a destination and makes custom aliases and analytics separation awkward. It also does not remove collision handling.
-
-## Why not a KGS now?
-
-A KGS (for example, a Postgres sequence encoded to Base62) guarantees uniqueness without retries, but:
-
-- It introduces a central write hotspot or sequence contention.
-- It requires a database round trip before the insert unless batched.
-- Random generation is simpler, fully stateless, and collision-free at v1 scale.
-
-A database sequence is a reasonable upgrade if retry rates or code length become a problem. It can be introduced behind the existing `CodeGenerator` interface.
-
-## Why not UUID / NanoID?
-
-- UUIDs are too long for a short link.
-- NanoID is functionally similar to the chosen approach; its default alphabet may include `-` and `_`, which are also valid in custom aliases. The project standardizes on Base62 for generated codes and a constrained alias grammar.
-- Hashids is reversible and not a security mechanism; it also needs a numeric input.
-
-## Capacity trigger
-
-Move from 7 to 8 characters when expected active links exceed approximately **100 million**, or when collision retries exceed 0.1% of creates. Re-evaluate at one billion links.
+Atomic [creation replay](../backend/api.md#idempotent-creation), rather than deterministic codes, handles client retries. Only conflicts on the code constraint should trigger allocation retry; other integrity failures must not be swallowed.
 
 ## References
 
-- [Short-link strategy](../backend/short-links.md)
-- [Data model](../backend/data-model.md)
-- [API contract](../backend/api.md)
+[Calculations and alias grammar](../backend/short-links.md) · [Data model](../backend/data-model.md)

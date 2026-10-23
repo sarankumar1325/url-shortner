@@ -1,225 +1,90 @@
-# UI System and Accessibility
+# UI and Accessibility
 
-Status: target design · Stack: Tailwind CSS v4, shadcn/ui, Radix primitives
+Status: target design; Tailwind v4, shadcn/ui and product screens are planned · Related: [architecture](architecture.md), [data fetching](data-fetching.md), [API contract](../backend/api.md)
 
-## Design direction
+## Design and scope
 
-The product should feel like a utility: fast, calm, and trustworthy. The primary action is obvious, the result is copyable in one click, and advanced options stay out of the way.
+Build a small anonymous utility: create a link, safely keep its management token, and inspect/manage that link. Use system fonts, shared color/spacing tokens, a mobile-first layout and selected accessible primitives rather than a new component framework. Light/dark themes must both meet contrast requirements. Do not claim that a component library by itself guarantees accessibility.
 
-Principles:
+V1 includes editing, deletion and rich analytics (totals, daily series, referrer origins, countries and devices). Accounts, team management, QR codes and unique-visitor reporting are outside V1.
 
-- **One job per screen.** Create on the home page; understand one link on the analytics page.
-- **Show the outcome.** After creation, the short URL and copy action dominate.
-- **Explain limits before failure.** Alias rules and expiry are visible near the fields.
-- **No dark patterns.** No forced sign-up, no hidden expiry, no misleading copy.
-- **Accessible by default.** Keyboard, screen reader, contrast, and reduced motion are part of every component.
+## Create and one-time backup
 
-## Tailwind v4 + shadcn setup
+The home screen has a labeled destination field, optional alias/expiry disclosure, a submit action, a result region and a clearly labeled “Recent links on this device” list. Do not steal focus on initial load. Validate on interaction/submission, preserve drafts on failure, and disable duplicate submits while a request is pending.
 
-```bash
-bun add tailwindcss @tailwindcss/vite
-bunx shadcn@latest init
-```
+After confirmed creation:
 
-`vite.config.ts`:
+1. Focus the result heading; show the short URL with distinct **Copy link** and **Open link** actions. Keep the full destination available through an accessible disclosure rather than a hover-only tooltip.
+2. Present a dedicated management-token backup section **before dismissing or navigating away from the result**. Offer reveal and **Copy management token**; do not confuse that action with copying the public link.
+3. Explain: “This token lets you edit, delete and view analytics. Save a copy now. If you lose it, the server cannot recover it.” The normal default is memory only; reload/closing the page loses that copy.
+4. Offer an unchecked **Remember on this device** option. Explain that this stores the token in this browser and scripts on this origin can read it; it is not cross-device backup or an account. Never select it automatically.
+5. On dismissal without a confirmed backup, warn and allow an explicit “Continue without saving.” Do not claim a backup exists merely because a token was displayed or a clipboard attempt started. Clear the revealed DOM value and transient create result on exit.
 
-```ts
-import tailwindcss from "@tailwindcss/vite";
-import react from "@vitejs/plugin-react";
-import { defineConfig } from "vite";
+Creation replay can return the same token for 24 hours to recover a lost response; it is not an ongoing reveal/recovery screen. Later views offer token paste/replace/forget, not a server “recover token” action.
 
-export default defineConfig({
-  plugins: [react(), tailwindcss()],
-  resolve: {
-    alias: { "@": "/src" },
-  },
-});
-```
+Clipboard denial or unavailability must leave a selectable value and manual-copy instructions. Announce “Link copied” or “Management token copied” without announcing the token itself. Avoid including tokens in toasts, support details, telemetry, page titles or URLs.
 
-`src/shared/styles/index.css`:
+## Link page and management
 
-```css
-@import "tailwindcss";
+The route `/links/:code` displays available metadata, a token entry/management area, UTC date controls, analytics and destructive actions. A copied route shares no authorization.
 
-@theme {
-  --color-background: oklch(1 0 0);
-  --color-foreground: oklch(0.16 0.02 250);
-  --color-primary: oklch(0.55 0.2 255);
-  --color-muted: oklch(0.96 0.01 250);
-  --radius-lg: 0.75rem;
-}
-```
-
-- Use CSS variables and Tailwind tokens rather than scattered hex values.
-- Support light and dark themes through the `dark` class; default to the system preference.
-- Keep the font stack local (system UI fonts) to avoid render-blocking font requests.
-- Add only the shadcn components that are used; they are copied into the repo and tree-shaken.
-
-## Component inventory
-
-| Area | Components |
+| State | Presentation |
 | --- | --- |
-| Primitives | Button, Input, Label, Card, Badge, Skeleton, Alert, Dialog, Tooltip, Toast |
-| Forms | URL field, alias field, expiry field, advanced disclosure, submit button |
-| Result | Short URL display, copy button, open link, manage/analytics actions |
-| Recent links | Compact list, copy action, status badge, empty state |
-| Analytics | Summary cards, daily chart, date range controls, token prompt |
-| Feedback | Inline field errors, form-level alert, loading skeleton, 404 panel |
+| No token, active link | Public metadata; explain why analytics/edit/delete need a saved token |
+| Missing token for private data | Labeled paste-token form; no private request until supplied |
+| Invalid token | Clear previous private results and show replacement form; no automatic public fallback |
+| Valid token, expired/inactive link | Metadata and analytics remain available; show explicit status and available management actions |
+| Public expired link | Expired notice; offer saved-token entry for management |
+| Unknown/deleted/blocked | Unavailable/not-found state without guessing the hidden reason |
+| Confirmed deletion | Remove local credential and cached views; focus the next logical heading |
 
-Use shadcn/ui primitives for focus management and ARIA behavior rather than building dialogs, popovers, or toasts from scratch.
+Expired owner metadata is not a forced 410 screen. A remembered token rejected with 401 must not leave old analytics visible. Token replacement, rejection or forgetting clears private metadata as well as analytics, including retained results. See the [credential transition rules](data-fetching.md#query-keys-and-credential-transitions).
 
-## Screens
+Use a confirmation dialog naming the link before DELETE. Wait for server confirmation for edits/deletion; avoid optimistic destructive state. Repeated DELETE with a valid token succeeds with 204, but never automatically retry PATCH/DELETE. After an ambiguous network outcome explain that the write may have succeeded, and offer reconciliation/manual retry.
 
-### Home
+“Forget this link” and “Clear remembered links” remove local access, not the server link or token's validity. Explain that a saved token elsewhere still works. If device storage is denied, full or corrupt, keep the app usable in memory and show whether remembering/forgetting actually succeeded. Cross-tab forget/replace must clear private results in open tabs.
 
-```text
-Header: product name · theme toggle · GitHub/docs link
+## Analytics is V1
 
-Hero: "Shorten a link in one step"
-Form:
-  [ Destination URL                     ] [ Shorten ]
-  Advanced: custom alias, expiry
-Result card (after success):
-  short.example/abc123        [Copy] [Open]
-  destination (truncated)
-  [Analytics] [Manage]
-Recent links (this browser):
-  code · destination · created · [Copy] [Analytics]
-```
+Display:
 
-- Destination URL is required and focused on load.
-- The submit button shows a pending state and is disabled during submission.
-- Advanced options are collapsed by default.
-- The result card receives focus after creation so keyboard users land on the outcome.
-- Recent links are local to the browser and clearly labeled as such.
+- Click, human-click and bot-click totals and a zero-filled daily series for the requested rollup range.
+- Top 10 referrer **origins**, top 10 countries and device categories from the available raw-event window (last 90 UTC days, including today). Provide tables even if charts are used; label null categories “Unknown,” not “Direct.”
+- The effective `breakdowns.from`/`to` and a retention notice when `breakdowns.truncated` is true. No overlap returns null boundaries and empty arrays: show “No breakdowns available for this range,” without erasing rollup totals. Do not imply top-10 rows sum to all clicks.
+- A refresh action and distinct fetch/processing freshness messages. `last_processed_at` is the latest retained event ingestion timestamp and may be null; `data_through` is null in V1 because complete coverage cannot be certified. “Checked just now” means only that a fetch succeeded, not that processing is current.
 
-### Link analytics
+Controls use UTC calendar dates. API ranges are `[from,to)` with `to` exclusive, maximum 366 days, no end beyond tomorrow UTC and no dates outside two-year rollup retention. Last-7/30-day presets end tomorrow UTC and include today. For example, on 2026-10-23 UTC, Last 30 days requests `from=2026-09-24&to=2026-10-24`. Label “All dates UTC”; if displaying an inclusive end date, show October 23 while sending October 24. Do not shift daily bucket labels into the viewer's local timezone.
 
-```text
-Back to home
-short.example/sysdesign   [Copy] [Open]
-Destination (truncated, expandable)
-Date range: [Last 7 days] [Last 30 days] [Custom]
-Totals: Clicks · Human · Bots
-Daily chart
-[Refresh]  Last updated ...
-Manage: edit destination · change expiry · delete
-```
+On the first load, use a labeled skeleton or loading region, not invented zero totals. On refresh or a new range, retain prior results only for the same link and credential generation, labeled with their actual range and “Updating.” If refresh fails, show the last successful range and an inline retry warning. Never relabel retained results as new data. Clear them for token changes or authoritative access/state failures.
 
-- Missing token → token paste form with an explanation that the token was shown once.
-- Deleted link → 404 state with a link home.
-- Expired link → 410 state; analytics may still be available with a token.
-- Fresh links show a note that analytics can lag by up to a minute.
+Zero-filled daily rows mean no processed clicks for those days, not proof of a fully drained pipeline. For fresh links or missing watermarks, say “Analytics processing may be delayed” or “Processing status not yet available.” Do not promise one-minute freshness, invent estimates, or show a never-ending loading state for a valid empty response. See [backend analytics](../backend/analytics.md).
 
-### Not found
+Privacy copy must match V1: aggregate clicks and limited recent breakdowns; **no IP-hash or unique-visitor collection**. Do not call referrer origins full browsing history or label human clicks as unique people.
 
-- Clear message, link home, no stack trace.
-- Preserve the requested path in the message for support.
+## Validation and feedback
 
-## State matrix
+Mirror the [API validation rules](../backend/api.md) for UX, with server errors authoritative:
 
-Every data surface implements all states:
+- Destination: absolute HTTP(S), no credentials/control characters, up to 8192 characters. Use `type="url"`, `inputMode="url"`, no auto-capitalization; do not claim client checks prove a target safe.
+- Alias: 3–32 lowercase letters/digits/`_`/`-`, alphanumeric ends; show a short-URL preview and reserved-name guidance.
+- Expiry: optional future time, at most five years ahead. A `datetime-local` input must identify the user's timezone and convert to a UTC timestamp; handle invalid/ambiguous local times instead of appending `Z` to local input.
+- Map server `errors[]` by `field`; show unrecognized fields in the form summary. Use `aria-invalid` and `aria-describedby` and focus the first invalid field after submission.
+- Distinguish 409 codes: alias conflict asks for another alias; `request_in_progress` offers manual same-request retry; `idempotency_conflict` explains that the pending request cannot be reused with changed data. Network failure preserves the existing create key/body. A body change starts a new request and warns about the uncertain previous outcome.
+- Show 429 retry timing without automatic resubmission. A cancelled action should not produce an offline/error toast or an automatic retry.
 
-| State | Treatment |
-| --- | --- |
-| Idle | Form ready; no empty skeleton |
-| Loading | Skeleton matching the final layout; `aria-busy` |
-| Empty | Helpful explanation + primary action |
-| Error | Specific message, retry, request ID |
-| Success | Result or data; focus moves appropriately |
-| Partial | Show available totals; mark series as delayed |
-| Offline | Banner; preserve input; retry when online |
+Use inline alerts for errors requiring action; toasts alone are insufficient. Include a request-ID disclosure where available, never raw response text. Offline detection is a hint, not proof of server reachability.
 
-## Forms and validation
+## Accessibility acceptance
 
-- Use React Hook Form with a Zod schema.
-- Client validation mirrors server rules for UX: absolute URL, max length, alias regex, expiry in the future.
-- Server errors map to fields when a `field` is present; otherwise show a form-level alert.
-- Error text is connected with `aria-describedby`; invalid inputs set `aria-invalid`.
-- Do not disable the submit button merely because the form is invalid on first render; show errors after interaction.
-- Use `type="url"`, `inputMode="url"`, and `autoCapitalize="none"` for the destination field.
-- Use `datetime-local` for expiry in v1 to avoid a custom date picker; convert to UTC before sending.
-- Show a character counter for the alias and a preview of the resulting short URL.
+- One page heading, logical heading order, landmarks, skip link and route-specific document titles. A route change moves focus to the page heading; background refresh does not move focus.
+- Every input has a visible associated label; every action works by keyboard, with visible focus. Icon-only buttons have accessible names; decorative icons are hidden from assistive technology.
+- Modal dialogs trap focus and restore it on close; nonmodal popovers use their appropriate keyboard pattern, not a blanket focus trap.
+- Use a polite status region for copy/create/refresh outcomes; urgent actionable errors remain discoverable inline. Mark loading regions `aria-busy` without repeatedly announcing entire tables.
+- Charts have summaries and equivalent accessible tables, including dates, counts and empty/unknown categories. Color never carries status or bot/human distinctions alone.
+- Meet WCAG 2.2 AA contrast (4.5:1 normal text, 3:1 large text and relevant UI boundaries). Aim for 44×44 px touch targets, respect reduced motion, and support 200% zoom and 320 px reflow.
+- Reserve space for async content; wrap actions and long values. A full URL must remain available without requiring a pointer hover.
+- Render all API/user strings as text, not HTML. Restrict clickable destinations to validated HTTP(S); outbound links use `rel="noopener noreferrer"`. Never echo an arbitrary unmatched route into telemetry or an error page.
 
-## Accessibility requirements
+The SPA not-found view provides a clear route home but ordinarily arrives in an HTTP-200 HTML response; only hosting changes can provide a true document 404. See [deployment](deployment.md).
 
-**Structure**
-
-- One `<h1>` per page; logical heading order.
-- Landmarks: `<header>`, `<main>`, `<footer>`, `<nav>` where appropriate.
-- Skip link to main content.
-- Document title updates per route.
-
-**Keyboard and focus**
-
-- Every action is reachable by Tab and operable by Enter/Space.
-- Visible focus ring with at least 3:1 contrast against the background.
-- Dialog and popover focus is trapped and restored on close.
-- After create success, focus the result heading or copy button.
-- After delete, focus the next logical element or the page heading.
-
-**Screen readers**
-
-- Labels for every input; placeholders are not labels.
-- `aria-live="polite"` region for copy confirmation, create success, and async errors.
-- Status badges include text, not color alone.
-- Charts include a text summary and an accessible data table or list.
-- Icons that duplicate text are `aria-hidden`; icon-only buttons have `aria-label`.
-
-**Visual**
-
-- WCAG 2.2 AA contrast (4.5:1 for normal text, 3:1 for large text and UI boundaries).
-- Minimum 44×44 px touch targets.
-- Respect `prefers-reduced-motion`; disable non-essential transitions.
-- Support 200% zoom and 320 px width without horizontal scrolling.
-- Do not rely on color alone for error, success, or bot/human status.
-
-**Content**
-
-- Error messages say what happened and what to do next.
-- Use plain language; avoid "422", "idempotency", and internal codes in primary copy.
-- Put technical details (request ID) behind a disclosure.
-- Confirm destructive actions (delete link) with a dialog that names the link.
-
-## Responsive layout
-
-- Mobile-first single column.
-- Content max width around 960 px on desktop.
-- Form and result stack on mobile; result actions wrap rather than overflow.
-- Long URLs truncate with a middle ellipsis and a title/tooltip; the full value is available to assistive technology.
-- The analytics chart is horizontally scrollable only if a minimum readable width cannot be preserved; otherwise stack summary cards.
-
-## Visual and interaction details
-
-- Use one primary button per view.
-- Copy action gives immediate feedback ("Copied") and resets after ~2 seconds.
-- Pending actions use a spinner plus text, not spinner alone.
-- Destructive actions use a distinct, accessible danger style.
-- Empty recent links state includes a short explanation, not a blank panel.
-- Do not use toast notifications for errors that need action; use inline alerts.
-
-## Security in the UI
-
-- Never inject URLs or aliases with `dangerouslySetInnerHTML`.
-- Treat API strings as untrusted; React escapes text by default.
-- External links use `rel="noopener noreferrer"`.
-- Do not display management tokens in the DOM after storage; allow replace/forget.
-- CSP (configured in deployment) blocks inline scripts, third-party scripts, and framing.
-
-## Content checklist
-
-- [ ] Product name and short domain are consistent.
-- [ ] Alias rules are visible before submission.
-- [ ] Expiry is explicit and shown in local time with a UTC hint.
-- [ ] The result card explains that the management token is saved in this browser.
-- [ ] Privacy copy explains hashed-IP analytics.
-- [ ] Error copy is actionable and free of internal jargon.
-- [ ] Empty states offer a next step.
-
-## Future UI work
-
-- QR code generation and download.
-- Link editing dialog with optimistic updates.
-- Referrer/country/device breakdowns.
-- Account dashboard and team management.
-- Internationalization; keep copy in one module when that lands.
+Before release, test create/backup, clipboard failure, token replacement and cross-tab forget, delete confirmation, all error/loading states, UTC controls and chart tables with keyboard and a screen reader. Automated axe/component tests are planned checks, not evidence of conformance today.

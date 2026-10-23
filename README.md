@@ -38,7 +38,11 @@ The current code is the initial scaffold; the design documents describe the targ
 
 ## Verification
 
+Run from the repository root; subshells keep each command in the correct folder.
+
 ```bash
-cd backend && uv run pytest && uv run ruff check .
-cd urlshortner && bun run build
+(cd backend && uv run pytest && uv run ruff check . && uv run ruff format --check .)
+(cd urlshortner && bun run lint && bun run build)
 ```
+
+See the [phased implementation plan](docs/README.md#implementation-plan) for dependencies, acceptance tests, and production release gates. Hosting, persistence, and product features are not implemented by the scaffold.

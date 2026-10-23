@@ -1,94 +1,34 @@
-# ADR 0005: Per-Link Anonymous Management Tokens
+# ADR 0005: Per-Link Anonymous Management Capabilities
 
-- Status: Accepted
-- Date: 2026-10-23
-
-## Context
-
-V1 has no user accounts, but anonymous users still need to:
-
-- View analytics for a link they created.
-- Change its destination or expiry.
-- Delete it.
-
-Requiring accounts would expand scope substantially. Making links immutable would make them hard to correct and would remove the management experience.
+Status: Accepted direction; replay/storage/security semantics refined · Reviewed: 2026-10-23
 
 ## Decision
 
-Issue a **per-link management token** at creation:
+Issue a random 256-bit URL-safe token per link. Store HMAC-SHA256 plus key version on the link row, verify in constant time, and transport it in `X-Management-Token` over HTTPS. It authorizes metadata, mutation and analytics for that link, never a global listing.
 
-- 32 random bytes, URL-safe base64 (256 bits).
-- Returned exactly once in the `201` response.
-- Stored as `HMAC-SHA256(pepper, token)`; the raw token is never stored or logged.
-- Sent on management requests via `X-Management-Token`.
-- Authorizes only that link.
-- Stored by the web app in `localStorage` for convenience.
+Keep the token in browser memory by default. Explicit opt-in can remember it on this device. During creation, provide an accessible reveal/copy step and warn that losing every copy loses management access. Storage failure must not hide the successful result; paste-token UX restores possession, not a server recovery service.
 
-`urls.owner_id` remains nullable so future accounts can own links without a destructive migration.
+## Explicit replay exception
 
-## Consequences
+The original token can be returned again with the **same required UUIDv4 creation key** for 24 hours. Therefore "shown once" means creation flow only, not literally one network response, and the system is not wholly hash-only at rest.
 
-**Positive**
+Commit link and AEAD-encrypted replay response in one Postgres transaction. The key is another sensitive capability; store its digest, redact it, bind ciphertext to request/key digests, and use a separate versioned encryption key. Enforce expiry at read time and clean up rows/keys with backup-retention consequences documented.
 
-- Anonymous users get full management without an account system.
-- Tokens are high-entropy, unguessable, and revocable by deleting the link or rotating the pepper (with a maintenance impact).
-- One token cannot access another link, limiting blast radius.
-- Accounts can be added later without changing the anonymous path.
-- No email, password, or identity infrastructure in v1.
+## Consequences and controls
 
-**Negative**
+- Anonymous management avoids identity infrastructure but has no account recovery or automatic cross-device sync.
+- LocalStorage is exposed to XSS; opt-in does not make it secure against scripts. Enforce CSP, no unsafe HTML, no unapproved third-party code, no tokens in URLs/logs/query keys.
+- Private Query caches must be scoped by a non-secret credential generation and canceled/removed when a token changes, is rejected or forgotten, including cross-tab changes. Never show old authorized data after credentials disappear.
+- All API responses use `no-store`; custom auth headers alone do not stop shared caching.
+- Hash versions permit transitional pepper rotation and rehash on successful authentication. Retiring a compromised pepper can invalidate remaining tokens; that is an explicit incident decision, not routine cleanup.
+- Deleted links lose management/analytics access; valid-token repeated DELETE alone remains `204`. Operators can block independently, and token holders cannot unblock.
 
-- The user must save the token; losing it means losing management access.
-- `localStorage` is readable by any script on the origin, so XSS becomes a token-theft vector.
-- No cross-device access or recovery.
-- Token rotation requires a pepper versioning strategy.
-- Users may not understand that the management link/token is sensitive.
+## Alternatives and future identity
 
-**Mitigations**
+Full accounts/magic links add identity/recovery infrastructure beyond v1. Immutable links omit needed corrections/deletion. Stateless JWTs complicate revocation without eliminating browser storage risks. Tokens in fragments still leak via sharing/history and are not the default UX.
 
-- Show the token once with a clear explanation and a copy action.
-- Store only the hash server-side.
-- Strict CSP, no HTML injection, and no third-party scripts on the app origin.
-- Provide "paste token" recovery when local storage is empty.
-- Provide "forget token" and "clear all" controls.
-- Rate-limit management endpoints.
-- Plan `token_hash_version` before rotating the pepper.
-
-## Alternatives considered
-
-### Immutable links
-
-No token or ownership model, but users cannot fix typos, change destinations, or delete links. Poor product experience and worse abuse remediation. Rejected.
-
-### Email magic links
-
-Creates an email dependency and account-like flows without a full identity system. More scope than v1 needs. Rejected.
-
-### Full accounts now
-
-Solves recovery and cross-device access but adds auth UI, sessions, password/OAuth, email verification, and account data protection. The user chose an anonymous v1; accounts remain the documented next step.
-
-### Signed stateless token (JWT)
-
-Could carry the link ID and permissions without database storage. However, revocation is harder, tokens can be replayed until expiry, and the token would still need secure client storage. A random opaque token with a stored hash is simpler and revocable.
-
-### Store the token in the URL fragment
-
-Fragments are not sent to the server and avoid access logs, but sharing the URL would leak management authority and browser history still contains it. Rejected for management; acceptable only as an explicit export flow with warnings in a future version.
-
-## Future path
-
-When accounts ship:
-
-- Authenticated creates set `owner_id`.
-- Account users can list and manage all their links without per-link tokens.
-- Anonymous links keep working with their tokens.
-- Offer a one-time "claim this link" flow that attaches `owner_id` when the token is presented.
-- Add token rotation and revocation endpoints.
+When accounts ship, add a users table and nullable owner FK in an additive migration, then a token-proven claim flow if needed. No unused user table/column is required now. Per-link token rotation can be designed alongside authenticated recovery; do not imply it already exists.
 
 ## References
 
-- [API contract](../backend/api.md)
-- [Security](../backend/security.md)
-- [Frontend data fetching](../frontend/data-fetching.md)
-- [Data model](../backend/data-model.md)
+[API replay/auth](../backend/api.md) · [Security](../backend/security.md) · [Frontend storage](../frontend/data-fetching.md) · [Data model](../backend/data-model.md)

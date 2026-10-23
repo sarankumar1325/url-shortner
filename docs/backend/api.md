@@ -1,45 +1,48 @@
 # API Contract
 
-Status: target design · Base path: `/api/v1` · Public redirects: `/{code}`
+Status: target design; only `/health` currently exists · [Architecture](architecture.md) · [Frontend integration](../frontend/data-fetching.md)
 
-## Conventions
+## Common rules
 
-- JSON request and response bodies use UTF-8 and `snake_case`.
-- Timestamps are UTC ISO 8601 with an explicit offset (`2026-10-23T12:00:00Z`).
-- The API is versioned by path. Additive fields are non-breaking; removals or semantic changes require `/api/v2`.
-- Every response carries `X-Request-ID`. Clients may send their own; invalid values are replaced.
-- Errors use [RFC 9457 Problem Details](https://www.rfc-editor.org/rfc/rfc9457) with `application/problem+json`.
-- Public create and redirect endpoints are rate-limited. Management endpoints additionally require a token.
-- The OpenAPI schema is the source of truth for the generated frontend client.
+- REST base: `/api/v1`; redirects: `/{code}` on the backend deployment, not the SPA.
+- UTF-8 JSON, `snake_case`, UTC ISO 8601 timestamps. Reject unknown mutation fields.
+- All API, redirect and error responses use `Cache-Control: no-store`. Custom auth headers do not prevent HTTP caching by themselves. No shared CDN caching of private responses.
+- Return `X-Request-ID`; accept a bounded validated UUID from callers or generate one. Never reflect arbitrary header text in logs.
+- Failures use [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) `application/problem+json`; OpenAPI describes response models, auth, errors and headers.
+- Enforce 64 KiB JSON body size while reading (not just trusting Content-Length); serialized destination limit is 8192 characters. Return `413` for an oversized body.
+- The contract is a pre-implementation revision, not a migration of an existing production API.
 
-## Authentication model
+## Authentication and state
 
-V1 has no user accounts.
+V1 has no accounts. Creation yields a 256-bit opaque management token, transported as `X-Management-Token` over HTTPS. The link row stores its HMAC-SHA256 hash plus key version. Creation replay is the explicit short-lived encrypted-storage exception; see below.
 
-- Anyone may create a link and follow a link.
-- Creation returns a **management token** exactly once.
-- Mutating or reading analytics requires `X-Management-Token: <token>`.
-- The server stores only `HMAC-SHA256(pepper, token)`. It cannot recover a lost token.
-- Tokens are 32 random bytes encoded as URL-safe base64 (256 bits of entropy).
-- A token authorizes exactly one link. Future account auth will add a separate bearer/JWT scheme.
+| Operation | Token behavior |
+| --- | --- |
+| Create / public redirect | No token |
+| GET metadata without token | Public active, nonexpired link only |
+| GET metadata with token | Validate token; allow inactive/expired links for management |
+| PATCH / DELETE / analytics | Token required and checked against the database |
 
-Public metadata is readable without a token because the destination is already discoverable by following the redirect. Analytics and mutation are private.
+If a token is supplied and invalid, return `401 invalid_token`, never silently downgrade to public access. Missing required token also returns `401`. Unknown code is `404`. Deleted/blocked links are `404` after any required token validation, except valid-token repeat DELETE returns `204`. Authorization does not use a redirect cache.
 
-## Endpoint summary
+For unauthenticated resolution: missing/deleted/blocked/inactive → `404`; otherwise expired → `410`; otherwise successful. Short codes and public metadata are not secrets.
 
-| Method | Path | Auth | Purpose |
-| --- | --- | --- | --- |
-| `POST` | `/api/v1/links` | none | Create a short link |
-| `GET` | `/api/v1/links/{code}` | none | Read public link metadata |
-| `PATCH` | `/api/v1/links/{code}` | management token | Update destination, expiry, or active state |
-| `DELETE` | `/api/v1/links/{code}` | management token | Soft-delete a link |
-| `GET` | `/api/v1/links/{code}/analytics` | management token | Read click totals and series |
-| `GET` | `/{code}` | none | Redirect to the destination |
-| `GET` | `/health` | none | Liveness probe |
-| `GET` | `/ready` | none | Readiness probe (Postgres + Redis) |
-| `GET` | `/internal/analytics/drain` | cron secret | Drain click events (scheduler only) |
+## Endpoints
 
-## Create a link
+| Method | Path | Result |
+| --- | --- | --- |
+| POST | `/api/v1/links` | `201` creation, including token |
+| GET | `/api/v1/links/{code}` | `200` metadata; optional token changes allowed states |
+| PATCH | `/api/v1/links/{code}` | `200` updated metadata |
+| DELETE | `/api/v1/links/{code}` | `204`, repeatable with valid token |
+| GET | `/api/v1/links/{code}/analytics` | `200` private totals/series/breakdowns |
+| GET / HEAD | `/{code}` | `302`, `404` or `410`; HEAD never counts a click |
+| GET | `/health` | Dependency-free liveness |
+| GET | `/ready` | Dependency readiness; `503` if required service unavailable |
+| GET | `/internal/analytics/drain` | Cron-authenticated ingestion; no public data |
+| GET | `/internal/maintenance` | Cron-authenticated bounded retention cleanup |
+
+## Create
 
 ```http
 POST /api/v1/links
@@ -55,21 +58,15 @@ Idempotency-Key: 8f14e45f-ea4d-4b1e-9c1a-5f0e2d7a6b31
 }
 ```
 
-| Field | Type | Required | Rules |
-| --- | --- | --- | --- |
-| `long_url` | string | yes | Absolute `http`/`https` URL, 1–8192 characters, no credentials, no control characters |
-| `custom_alias` | string | no | 3–32 characters, lowercase `[a-z0-9_-]`, starts and ends alphanumeric, not reserved |
-| `expires_at` | string \| null | no | Future timestamp, at most 5 years ahead; omitted or `null` means no expiry |
+- `long_url`: required absolute HTTP(S) URL; [validation policy](short-links.md#destination-validation).
+- `custom_alias`: optional/null; lowercase `^[a-z0-9][a-z0-9_-]{1,30}[a-z0-9]$`, 3–32 characters, not reserved. Missing/null means generated code.
+- `expires_at`: optional/null means no expiry; otherwise strictly future, at most five years ahead.
+- `Idempotency-Key`: required random UUIDv4; generate with `crypto.randomUUID()` or `uuid.uuid4()`.
 
-Response: `201 Created`
-
-```http
-Location: /api/v1/links/sysdesign
-```
+Return `201` with `Location: /api/v1/links/sysdesign` and:
 
 ```json
 {
-  "id": 42,
   "short_code": "sysdesign",
   "short_url": "https://short.example/sysdesign",
   "long_url": "https://example.com/articles/system-design?ref=shortener",
@@ -77,232 +74,123 @@ Location: /api/v1/links/sysdesign
   "is_active": true,
   "expires_at": "2027-01-01T00:00:00Z",
   "created_at": "2026-10-23T12:00:00Z",
-  "management_token": "Q2xvdWQtc2NhbGUtc2VjcmV0LXRva2Vu..."
+  "updated_at": "2026-10-23T12:00:00Z",
+  "management_token": "illustrative-token-not-a-real-credential"
 }
 ```
 
-`management_token` appears only in this response. The client must store it before navigating away. If the request includes `Idempotency-Key`, replaying the same key and body returns the original response, including the token, for 24 hours.
+GET/PATCH metadata have the same fields **except `management_token`**. Internal bigint IDs are not exposed. Build `short_url` from trusted configuration, not the incoming Host header.
 
-Errors: `400` invalid URL, `409` alias taken / idempotency conflict, `422` schema validation, `429` rate limited, `503` dependency unavailable.
+### Idempotent creation
 
-## Read link metadata
+1. Validate key format and canonical input; hash both. Treat omitted and null optional create fields equivalently. Do not re-evaluate a previously successful request's time-relative expiry check on replay; an expiry that is now past does not invalidate the original result.
+2. Serialize requests on the key hash in Postgres. Reserve it, create the link, and encrypt/store the complete successful response in the same transaction.
+3. Concurrent same key/body → one link and the same token; different body → `409 idempotency_conflict`. On a bounded key-lock wait → `409 request_in_progress` with `Retry-After`.
+4. Same key/body within 24 hours → replay original `201` body and Location, with a fresh request ID. It describes creation, not the current mutable link state; replay cannot reactivate a deleted link or undo a block.
+5. Enforce 24-hour expiry during reads and cleanup; after expiry the key is not guaranteed to deduplicate. Do not indefinitely retry an ambiguous request.
 
-```http
-GET /api/v1/links/sysdesign
-```
+The key grants access to the replayed token: redact it as a secret, require high entropy, store only its digest. A random-looking format cannot prove a caller used good randomness; document the client requirement. Store replay ciphertext with AEAD, unique nonces, associated key/request hashes and a separate versioned encryption key. No plaintext response cache in Redis.
 
-```json
-{
-  "short_code": "sysdesign",
-  "short_url": "https://short.example/sysdesign",
-  "long_url": "https://example.com/articles/system-design?ref=shortener",
-  "is_custom_alias": true,
-  "is_active": true,
-  "expires_at": "2027-01-01T00:00:00Z",
-  "created_at": "2026-10-23T12:00:00Z"
-}
-```
+Malformed input does not consume a key. Transaction failure rolls back both link and replay reservation; do not commit an incomplete record. A successful DB commit followed by a dropped HTTP response is recoverable using the same key. Required concurrency/crash tests are in [data-model.md](data-model.md).
 
-The management token is never returned. Expired links return `410 Gone`; deleted or inactive links return `404 Not Found` to avoid confirming their existence.
+## Update and delete
 
-## Update a link
+PATCH accepts only `long_url`, `expires_at`, `is_active`, and requires at least one field. Null expiry clears it; omission preserves it. Null URL/active values are invalid. Code, token and operator block state cannot be changed. Revalidate URL/expiry, commit, then invalidate the positive cache best-effort.
 
-```http
-PATCH /api/v1/links/sysdesign
-Content-Type: application/json
-X-Management-Token: Q2xvdWQtc2NhbGUtc2VjcmV0LXRva2Vu...
-```
+For v1, concurrent valid PATCH operations use last-committed-write-wins for supplied fields. Do not auto-retry PATCH after ambiguous failure: read authenticated metadata and ask the user to confirm. Conditional versioning can be added if collaborative editing becomes necessary.
 
-```json
-{
-  "long_url": "https://example.com/articles/system-design-v2",
-  "expires_at": null,
-  "is_active": true
-}
-```
+DELETE soft-deletes atomically and invalidates the cache. Repeat DELETE with the correct token returns `204`; unknown or operator-blocked codes return `404`. The token cannot read analytics or mutate a deleted link. "Forget locally" is a separate frontend action and never deletes the server resource.
 
-- All fields are optional; at least one must be present.
-- `expires_at: null` clears the expiry; omitting the field leaves it unchanged.
-- Changing the destination invalidates the redirect cache.
-- The short code and management token cannot be changed.
-- Response: `200 OK` with the same shape as the public metadata response.
-- Errors: `401` missing/invalid token, `404`, `409` invalid state, `422`.
+Redirect changes may take up to the 60-second [cache-age bound](caching-and-scale.md#freshness-and-mutation-races); do not promise immediate revocation from a `200`/`204`. Urgent abuse takedowns use the edge control described in security docs.
 
-## Delete a link
+## Analytics
 
 ```http
-DELETE /api/v1/links/sysdesign
-X-Management-Token: Q2xvdWQtc2NhbGUtc2VjcmV0LXRva2Vu...
+GET /api/v1/links/sysdesign/analytics?from=2026-10-23&to=2026-10-24&interval=day
+X-Management-Token: illustrative-token-not-a-real-credential
 ```
 
-- Response: `204 No Content`.
-- Soft-deletes the row, preserves analytics, and invalidates the cache.
-- The alias remains reserved; it is not reused by new links.
-- Following the link afterwards returns `404`.
-- Repeated deletes return `404`.
-
-## Read analytics
-
-```http
-GET /api/v1/links/sysdesign/analytics?from=2026-10-01&to=2026-10-23&interval=day
-X-Management-Token: Q2xvdWQtc2NhbGUtc2VjcmV0LXRva2Vu...
-```
-
-| Parameter | Default | Rules |
+| Parameter | Default | Semantics |
 | --- | --- | --- |
-| `from` | 30 days before `to` | Date or timestamp; inclusive |
-| `to` | now | Date or timestamp; inclusive |
-| `interval` | `day` | `day` only in v1 |
+| `to` | Tomorrow's UTC date | Exclusive date `YYYY-MM-DD`; at most tomorrow UTC |
+| `from` | `to` minus 30 days | Inclusive UTC date; must precede `to` |
+| `interval` | `day` | Only `day` in v1 |
+
+The interval is `[from at 00:00 UTC, to at 00:00 UTC)`. Accept 1–366 days; reject timestamp strings, reversed ranges, or dates outside the two-year rollup retention with `422`. This default includes today's partial bucket. Zero-fill every requested day and make totals equal the series sum.
+
+Example for a one-day range:
 
 ```json
 {
   "short_code": "sysdesign",
-  "from": "2026-10-01T00:00:00Z",
-  "to": "2026-10-23T00:00:00Z",
-  "totals": {
-    "clicks": 1234,
-    "human_clicks": 1200,
-    "bot_clicks": 34
-  },
+  "from": "2026-10-23",
+  "to": "2026-10-24",
+  "totals": { "clicks": 12, "human_clicks": 10, "bot_clicks": 2 },
   "series": [
-    { "day": "2026-10-01", "clicks": 42, "human_clicks": 40, "bot_clicks": 2 }
-  ]
+    { "day": "2026-10-23", "clicks": 12, "human_clicks": 10, "bot_clicks": 2 }
+  ],
+  "breakdowns": {
+    "from": "2026-10-23",
+    "to": "2026-10-24",
+    "truncated": false,
+    "top_referers": [{ "value": "https://example.com", "clicks": 12 }],
+    "top_countries": [{ "value": "US", "clicks": 12 }],
+    "devices": [{ "value": "desktop", "clicks": 10 }, { "value": "bot", "clicks": 2 }]
+  },
+  "last_processed_at": "2026-10-23T12:01:30Z",
+  "data_through": null
 }
 ```
 
-- Raw event breakdowns (referrer, country, device) are available for the last 90 days in a later additive revision of this endpoint.
-- A range longer than 366 days returns `422`.
-- Data is eventually consistent: a click may take up to one drain interval to appear.
-- Expired or inactive links remain readable with the token.
+- V1 includes referrer-origin, country and device breakdowns. Top referrers/countries are limited to 10 entries each; `value: null` means unknown/unavailable, not proof of direct traffic. Devices list observed categories. All count bot and non-bot events; tie-break by value for stable output.
+- Breakdown range is the intersection with the last 90 UTC days, including today; older range portions are marked `truncated: true`. If no overlap, `from`/`to` are null and arrays empty. Top-10 totals need not equal overall clicks.
+- Totals/series always come from rollups, including today; never add the same raw counts again. Use a consistent read snapshot for totals and breakdowns.
+- `last_processed_at` is the latest `ingested_at` among this link's retained raw events, or null. It is not proof the queue is drained; old links with only rollups may have null here.
+- `data_through` is null in v1: best-effort capture cannot certify complete event-time coverage. Do not turn the last event timestamp into a completeness guarantee.
+- Under normal operation aim for p95 captured-event freshness under two minutes. Missed schedules, pending recovery and backlog can exceed it; the UI must not promise a click appears in exactly one minute.
+- Inactive/expired links remain available with valid auth; deleted/blocked links do not. `human_clicks` is a classifier estimate, not verified people; no unique-visitor metric.
 
-## Redirect
+## Redirects
 
-```http
-GET /sysdesign
-```
+GET resolves state, awaits a bounded enqueue attempt, and emits `302` with Location, `no-store`, `X-Robots-Tag: noindex, nofollow` and `Referrer-Policy: no-referrer`. HEAD emits identical status/headers but no body/event. Other methods return `405` and never record a click.
 
-```http
-HTTP/1.1 302 Found
-Location: https://example.com/articles/system-design?ref=shortener
-Cache-Control: no-store
-X-Robots-Tag: noindex, nofollow
-```
+`302` avoids permanent browser redirect caching; it does not make click analytics exact. Crawlers, previews, transport failures and event loss still affect counts. HTML error pages must escape all content; API clients get Problem Details.
 
-- `302` is intentional: `301` may be cached indefinitely by browsers, which breaks analytics and link updates.
-- `Cache-Control: no-store` keeps click capture accurate. Scale comes from Redis, not browser caches.
-- `404` for unknown, deleted, or inactive codes; `410` for expired codes.
-- Browser requests (`Accept: text/html`) receive a minimal HTML error page; API clients receive Problem Details.
-- Every redirect attempts to append a click event. Failure to enqueue never changes the redirect response.
-
-## Manage reserved aliases
-
-The following aliases are unavailable at every case:
-
-```text
-api, health, ready, docs, redoc, openapi.json, admin, login, logout, signup,
-static, assets, favicon.ico, robots.txt, sitemap.xml, well-known, internal,
-metrics, _next, graphql
-```
-
-The list is code-owned and versioned with the API. Custom alias validation rejects reserved values with `400` and code `reserved_alias`.
-
-## Rate limits
-
-Limits are per hashed client IP and per scope. Values are configurable; these are production defaults.
-
-| Scope | Limit | Window | On exceed |
-| --- | --- | --- | --- |
-| Create link | 20 | 60 s | `429`, `Retry-After` |
-| Redirect | 600 | 60 s | `429`, `Retry-After` |
-| Public metadata | 120 | 60 s | `429` |
-| Analytics | 60 | 60 s | `429` |
-| Internal drain | cron secret only | n/a | `401` |
-
-Successful responses may include:
-
-```http
-RateLimit-Limit: 20
-RateLimit-Remaining: 17
-RateLimit-Reset: 1761220800
-```
-
-`429` responses always include `Retry-After` in seconds. The server fails open for redirects if Redis is unavailable, and logs a metric so the degradation is visible.
-
-## Errors
-
-```http
-HTTP/1.1 409 Conflict
-Content-Type: application/problem+json
-```
+## Errors and rate limits
 
 ```json
 {
-  "type": "https://api.short.example/problems/alias-taken",
-  "title": "Alias already taken",
+  "type": "about:blank",
+  "title": "Conflict",
   "status": 409,
-  "detail": "The alias 'sysdesign' is already in use.",
+  "detail": "That alias is already in use.",
   "instance": "/api/v1/links",
   "code": "alias_taken",
-  "request_id": "01JQ9Z3K4M8YV2R6T0W7X1N5B8"
+  "request_id": "8f14e45f-ea4d-4b1e-9c1a-5f0e2d7a6b31"
 }
 ```
 
-| Status | Code | Meaning |
-| --- | --- | --- |
-| `400` | `invalid_url` | Unsupported scheme, credentials, private target, or malformed URL |
-| `400` | `reserved_alias` | Alias is reserved by the service |
-| `401` | `invalid_token` | Missing or incorrect management token |
-| `404` | `link_not_found` | Unknown, deleted, or inactive link |
-| `409` | `alias_taken` | Custom alias already exists |
-| `409` | `idempotency_conflict` | Same idempotency key with a different request body |
-| `410` | `link_expired` | Link existed but has expired |
-| `422` | `validation_error` | Schema or query validation failed |
-| `429` | `rate_limited` | Rate limit exceeded |
-| `500` | `internal_error` | Unexpected server error; includes `request_id` |
-| `503` | `dependency_unavailable` | Postgres or Redis required for this operation is unavailable |
+| Status | Codes |
+| --- | --- |
+| 400 | `invalid_url`, `reserved_alias` |
+| 401 | `invalid_token` |
+| 404 | `link_not_found` |
+| 409 | `alias_taken`, `idempotency_conflict`, `request_in_progress` |
+| 410 | `link_expired` |
+| 413 | `payload_too_large` |
+| 422 | `validation_error` (including missing/invalid idempotency key) |
+| 429 | `rate_limited` |
+| 500 | `internal_error` |
+| 503 | `dependency_unavailable` |
 
-Validation errors include a `errors` extension array with `field`, `code`, and `message` per issue. Internal errors never include stack traces or SQL.
+Validation errors carry `errors: [{field, code, message}]`; never include Pydantic's raw input, a submitted token or destination in error telemetry. A 409 is not always an alias collision.
 
-## Idempotency
+Initial per-IP limits: create 20/minute, redirect 600/minute, public metadata 120/minute, management/analytics combined 60/minute. Limit management attempts before token lookup, plus a bounded per-code attempt budget. Create also has an operator-set global daily budget. Limits and degraded policies are in [caching-and-scale.md](caching-and-scale.md).
 
-- `Idempotency-Key` is optional on `POST /api/v1/links`.
-- Accepted format: 8–128 printable ASCII characters; UUIDs are recommended.
-- The server stores a fingerprint of the request body and the full response for 24 hours.
-- Same key + same body → replay the stored response.
-- Same key + different body → `409 idempotency_conflict`.
-- If Redis is unavailable and the header is present, creation fails with `503` rather than risking a duplicate.
+`429` always carries integer `Retry-After` seconds. Optional `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` use documented delta-seconds for reset, not Unix timestamps. Cron uses constant-time bearer validation against **`CRON_SECRET`**, rejects missing configuration and unauthorized callers, and returns only processing counts.
 
-## CORS
+## CORS and schema
 
-- Allowed origins are explicit; wildcards are not used.
-- Production: `https://app.short.example`.
-- Local: `http://localhost:5173`.
-- Methods: `GET`, `POST`, `PATCH`, `DELETE`, `OPTIONS`.
-- Allowed request headers: `Content-Type`, `Idempotency-Key`, `X-Management-Token`, `X-Request-ID`.
-- Exposed response headers: `X-Request-ID`, `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`, `Retry-After`.
-- Credentials are disabled in v1 because no cookies are used.
+Exact controlled origins; no credentialed cookies and no broad preview wildcard. Methods: GET, HEAD, POST, PATCH, DELETE, OPTIONS. Allow Content-Type, Idempotency-Key, X-Management-Token, X-Request-ID; expose Location, X-Request-ID, rate-limit headers and Retry-After. Preflight never triggers a click or consumes mutation limits.
 
-## OpenAPI and documentation
-
-- Schema: `GET /openapi.json`.
-- Interactive docs (`/docs`, `/redoc`) are enabled locally and disabled when `ENVIRONMENT=production`.
-- The frontend generates types from the schema; see [frontend/data-fetching.md](../frontend/data-fetching.md).
-- CI snapshots the schema so accidental breaking changes are reviewed.
-
-## Examples
-
-```bash
-curl -sS -X POST http://127.0.0.1:8000/api/v1/links \
-  -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: 3d2f6a10-8c44-4f5e-9b0a-6a1d7e2c4b90' \
-  -d '{"long_url":"https://example.com","custom_alias":"demo"}'
-```
-
-```bash
-curl -sSI http://127.0.0.1:8000/demo
-```
-
-```bash
-curl -sS http://127.0.0.1:8000/api/v1/links/demo/analytics \
-  -H "X-Management-Token: $TOKEN"
-```
+`/openapi.json` is public and contains no secrets; `/docs` and `/redoc` are local/preview only. Generate the schema offline and frontend types in CI without a live database. These settings are planned; the scaffold currently exposes interactive docs in all environments.

@@ -1,215 +1,81 @@
 # Frontend Architecture
 
-Status: target design · Stack: Bun, Vite 8, React 19, TypeScript 6, Tailwind v4, shadcn/ui
+Status: target design, not implemented · Related: [API contract](../backend/api.md), [data fetching](data-fetching.md), [deployment](deployment.md)
 
-## Product surface
+## Current scaffold versus target
 
-The web app is a static single-page application with three primary experiences:
+The application lives in `urlshortner/`. It currently declares React 19, Vite 8, TypeScript 6 and oxlint, with `dev`, `build`, `lint` and `preview` scripts and a `bun.lock`. `src/App.tsx` and the CSS are starter UI; there is no product router or API integration yet.
 
-1. **Create** — paste a URL, optionally set a custom alias and expiry, get a short link.
-2. **Manage** — copy the link, keep a local list of links created on this browser, edit or delete with a management token.
-3. **Understand** — view click totals and a daily series for a link.
+The following are **planned**, not installed/configured guarantees:
 
-The app is anonymous in v1. It does not have sign-in, a global account dashboard, or team features.
+| Concern | Target |
+| --- | --- |
+| Reproducibility | Pin a tested Bun version via `packageManager`; use frozen installs |
+| Type safety | Enable strict TypeScript; generate and check API types from OpenAPI |
+| Navigation | React Router, with lazy analytics route |
+| Server state | TanStack Query, memory-only cache |
+| Forms | React Hook Form and Zod, with server validation authoritative |
+| UI | Tailwind v4 and selected shadcn/ui primitives; system fonts |
+| Analytics | Lazy chart dependency plus accessible tables |
+| Verification | Vitest, Testing Library/MSW, Playwright/axe and measured bundle budgets |
 
-## Why a static SPA
+Do not describe those checks as running in CI until scripts and workflows exist. In particular, `tsconfig.app.json` does not currently enable `strict`, and there are no test or API-generation scripts. Add tools only alongside the feature that needs them; no speculative store or repository layer is needed.
 
-- The API is the only backend; there is no server-rendered content.
-- Vercel's CDN serves immutable assets with low latency and near-zero compute.
-- The app does not need SEO beyond a marketing landing page; short links are not indexed.
-- React 19 + Vite + Bun gives a fast local loop and a small operational surface.
+## Product boundary
 
-Tradeoffs:
+V1 is an anonymous static SPA:
 
-- Initial JS must be paid before the first interaction; route splitting and a lean dependency set control that.
-- Viewer-specific data requires client-side fetching; TanStack Query handles caching and retries.
-- No server-side secrets; management tokens live in the browser.
+- **Create:** destination URL, optional alias and expiry; show the returned short link and one-time management-token backup.
+- **Manage:** edit, deactivate or delete one link using its token; optionally remember that token on this device.
+- **Understand:** totals, daily clicks, top referrer origins/countries and device categories. Breakdowns are V1, not future work.
 
-## Stack
+No accounts, team dashboard, server-rendered pages, token recovery service or unique-visitor tracking. Public redirects run on the backend short domain, outside this app. See [backend architecture](../backend/architecture.md) and [analytics](../backend/analytics.md).
 
-| Concern | Choice | Notes |
+## Routes and ownership
+
+| Route | Content | Loading |
 | --- | --- | --- |
-| Runtime/package manager | Bun 1.4 | `bun.lock` committed; Vercel builds with Bun |
-| Build | Vite 8 | Static output in `dist/` |
-| UI | React 19 + TypeScript 6 | Strict TypeScript |
-| Routing | React Router v7 (library mode) | Lazy route modules |
-| Server state | TanStack Query v5 | Cache, dedupe, retries, invalidation |
-| Forms | React Hook Form + Zod | Shared validation schema client-side |
-| Styling | Tailwind CSS v4 + shadcn/ui | CSS-first config, accessible primitives |
-| Icons | lucide-react | Tree-shakeable imports |
-| Charts | Recharts (via shadcn chart) | Lazy-loaded with the analytics route |
-| Toasts | sonner | Copy/save feedback |
-| API types | openapi-typescript + openapi-fetch | Generated from the FastAPI schema |
-| Lint/test | oxlint, Vitest, Testing Library, Playwright | Fast local checks plus E2E |
+| `/` | Create, result and local recent links | Eager |
+| `/links/:code` | Metadata, token entry, analytics and management | Lazy |
+| Unmatched path | Not-found view with navigation home | Eager |
 
-Add dependencies only when the feature that needs them lands. The current scaffold has only React and Vite.
+A static SPA fallback normally serves `index.html` with **HTTP 200**, including unknown client routes. A not-found component is not a transport-level 404. Backend metadata/redirect errors retain their actual HTTP statuses; a true document 404 would require different hosting behavior.
 
-## Target folder structure
+Only code and validated UTC date-only `from`/`to` values belong in route/search state. Never put tokens in URLs. A shared analytics URL shares the selection, not authorization.
 
-```text
-urlshortner/
-├── src/
-│   ├── main.tsx
-│   ├── app/
-│   │   ├── app.tsx
-│   │   ├── providers.tsx          # QueryClient, theme, router, toaster
-│   │   ├── router.tsx             # route table + lazy imports
-│   │   └── error-boundary.tsx
-│   ├── pages/
-│   │   ├── home-page.tsx
-│   │   ├── link-analytics-page.tsx
-│   │   └── not-found-page.tsx
-│   ├── features/
-│   │   ├── create-link/
-│   │   │   ├── components/
-│   │   │   │   ├── create-link-form.tsx
-│   │   │   │   └── link-result-card.tsx
-│   │   │   └── hooks/use-create-link.ts
-│   │   ├── recent-links/
-│   │   │   ├── components/recent-links.tsx
-│   │   │   └── hooks/use-managed-links.ts
-│   │   └── link-analytics/
-│   │       ├── components/analytics-summary.tsx
-│   │       ├── components/clicks-chart.tsx
-│   │       └── hooks/use-link-analytics.ts
-│   ├── shared/
-│   │   ├── api/
-│   │   │   ├── client.ts          # openapi-fetch instance + middleware
-│   │   │   ├── errors.ts          # Problem Details normalization
-│   │   │   ├── query-keys.ts
-│   │   │   └── schema.d.ts        # generated; do not edit
-│   │   ├── components/ui/         # shadcn components
-│   │   ├── lib/
-│   │   │   ├── env.ts
-│   │   │   ├── format.ts
-│   │   │   ├── storage.ts
-│   │   │   └── utils.ts
-│   │   └── styles/index.css
-│   └── vite-env.d.ts
-├── tests/
-│   ├── unit/
-│   └── e2e/
-├── package.json
-├── bun.lock
-├── vite.config.ts
-└── vercel.json
-```
+Keep responsibilities small as features land:
 
-The current app has `src/App.tsx`, `src/main.tsx`, and boilerplate CSS. It is reorganized when the first feature lands.
+- App shell: router, stable QueryClient, error boundaries and status announcements.
+- Feature UI/hooks: create, local recent links, metadata/management and analytics.
+- Shared API code: generated types, transport, normalized errors and query keys.
+- Credential state: token in memory, optional device storage, generation changes and cache cleanup.
 
-## Routing
+UI state stays local; Query owns server snapshots; forms own drafts; the router owns navigation. Browser storage is neither an account nor authoritative metadata. No Redux/Zustand is needed for this scope.
 
-| Route | Page | Loading |
-| --- | --- | --- |
-| `/` | Create + recent links | Eager |
-| `/links/:code` | Analytics and management | Lazy |
-| `*` | Not found | Eager |
+## Credential and cache boundary
 
-- Use a route-level error boundary and a Suspense fallback.
-- Unknown routes render a real 404 page, not a redirect.
-- Analytics date range is stored in search params (`?from=...&to=...`) so views are shareable and back/forward works.
-- Do not put management tokens in URLs; they are read from local storage or entered explicitly.
+The default token lifetime is the current page session in memory. “Remember on this device” is an explicit opt-in to localStorage, with a warning that same-origin scripts can read it. Creation must offer reveal/copy before dismissing its result, and explain that a lost copy cannot be recovered by the server. The 24-hour idempotent replay is transport recovery, not a token-retrieval endpoint.
 
-## Data flow
+Every private query uses a **non-secret credential-generation identifier** in its key, including metadata requests that carry a token. Tokens and token hashes are not query-key material. Public metadata and token-bearing metadata use separate keys.
 
-```mermaid
-flowchart LR
-    UI[React components] --> Hooks[TanStack Query hooks]
-    Hooks --> Client[openapi-fetch client]
-    Client --> API[FastAPI]
-    API --> Client
-    Client --> Types[generated schema.d.ts]
-    Local[localStorage<br/>managed links + tokens] --> Hooks
-```
+On replacement, rejection or forgetting a token: disable the old credential, cancel its requests, remove its private caches and visible results, and create a fresh generation before new requests. Ignore late responses/errors from older generations. Retained analytics results must never cross that boundary. Handle cross-tab forget/replace and storage denial, quota failures and corrupt records; details are in [data fetching](data-fetching.md).
 
-- Components never call `fetch` directly.
-- Query hooks own fetching, caching, and error normalization.
-- UI state (open/closed, active tab) stays local; server state stays in Query.
-- Local storage is a side channel for anonymous ownership, not a source of truth for link metadata.
+Do not persist Query caches, token-bearing mutation results, or pending requests. Do not send tokens to URLs, logs, telemetry or generic error capture. Pass the token per request in `X-Management-Token`, not as a shared client's mutable default header.
 
-## State categories
+## API invariants
 
-| State | Owner | Examples |
-| --- | --- | --- |
-| Server state | TanStack Query | Link metadata, analytics |
-| URL state | React Router | `code`, date range |
-| Form state | React Hook Form | URL, alias, expiry |
-| Local persistence | `localStorage` | Management tokens, recent codes |
-| Ephemeral UI | `useState` / context | Dialog visibility, theme, toasts |
+- All API responses, including errors and public metadata, use `Cache-Control: no-store`. The frontend also requests `cache: "no-store"`; bounded in-memory Query reuse is separate from HTTP caching.
+- Public metadata is for active, unexpired links. Supplying a token always requests validation: an invalid token returns 401, not a public fallback. Valid tokens allow expired/inactive metadata; deleted/blocked links return 404. Analytics requires a token and has the same state rules.
+- Create requires a UUIDv4 `Idempotency-Key` header separate from the JSON body. The backend atomically commits the link and encrypted replay response in Postgres; the same key/body replays the original response, including its token, for 24 hours.
+- All mutation defaults have zero retries. Only the explicit create request sequence permits one retry for network failure, timeout or 503, using the identical key/body. `409 request_in_progress` is a manual same-key retry; cancellations and PATCH/DELETE have no automatic retries. Repeated DELETE with a valid token returns 204.
+- Analytics uses UTC date-only `[from,to)`, with default `to` tomorrow UTC and `from` 30 days earlier, including today; maximum 366 days. Freshness is described using server timestamps/watermarks, never a one-minute guarantee.
 
-There is no Redux or Zustand in v1. Adding a global store would duplicate state that Query and the router already own.
+Exact errors, retry behavior and analytics fields are centralized in [data fetching](data-fetching.md), not duplicated in component-specific clients.
 
-## API client
+## Delivery and verification
 
-- `openapi-fetch` is created once with `VITE_API_BASE_URL`.
-- A middleware adds `X-Request-ID` and `X-Management-Token` when supplied.
-- Errors are converted to a discriminated `ApiProblem` type:
+Build a static bundle for the separate Vercel frontend project. `VITE_*` values are public build-time configuration. Deployment remains unverified until the entrypoint, deep links, response headers, exact-origin CORS/CSP and backend integration pass the [deployment gates](deployment.md).
 
-```ts
-type ApiProblem = {
-  status: number;
-  code: string;
-  title: string;
-  detail: string;
-  requestId?: string;
-};
-```
+Implement in feature-sized steps: shell and tooling; typed create/token backup; credential-scoped metadata and management; rich analytics; then accessibility, security and measured performance gates. Use [UI requirements](ui-and-a11y.md) and [performance targets](performance.md) as acceptance criteria, not claims about the starter.
 
-- The client never throws raw `Response` objects into components.
-- Generated types are produced from the backend's OpenAPI schema; see [data-fetching.md](data-fetching.md).
-
-## Error handling and resilience
-
-- Root and route error boundaries catch render failures.
-- Query errors render inline error states with a retry action and the request ID.
-- Network requests use `AbortController` timeouts (10 s default).
-- GET requests retry twice with exponential backoff on network errors and 5xx.
-- Mutations do not retry unless they are idempotent. Create is retried only with the same `Idempotency-Key`.
-- A missing or rejected management token renders a "paste your token" recovery form, not a dead end.
-- Offline or API-down states explain what happened and preserve the user's input.
-
-## Security
-
-- No secrets in the bundle; every `VITE_*` variable is public.
-- Management tokens are stored only in the browser. They are readable by any script on the origin, so XSS prevention is critical.
-- Never render user URLs with `dangerouslySetInnerHTML`.
-- Enforce a strict CSP via Vercel headers.
-- Validate URLs client-side for UX, but treat server validation as authoritative.
-- Use `rel="noopener noreferrer"` for external links.
-- Do not log tokens or full URLs to analytics or error reporting.
-
-## Accessibility and performance
-
-- Every interactive element is keyboard reachable with a visible focus state.
-- Forms use associated labels, descriptions, and `aria-describedby` for errors.
-- Copy success is announced through an `aria-live` region.
-- Color contrast meets WCAG 2.2 AA.
-- The analytics route and chart library are lazy-loaded.
-- Initial JS budget and Web Vitals targets are defined in [performance.md](performance.md).
-
-## Testing strategy
-
-| Level | Scope | Tools |
-| --- | --- | --- |
-| Unit | Validation, formatting, error normalization, storage | Vitest |
-| Component | Create flow, copy feedback, error/empty states | Testing Library + MSW |
-| E2E | Create → copy → redirect → analytics | Playwright against a local API |
-| Accessibility | Automated checks on primary routes | axe-core in Playwright |
-
-CI runs `oxlint`, `tsc -b`, `vitest run`, and `bun run build`. E2E runs against a preview or local stack.
-
-## Design boundaries
-
-- The frontend does not know about Postgres, Redis, streams, or short-code generation rules beyond validation.
-- The backend owns canonical URL validation, alias rules, expiry, and analytics semantics.
-- Shared enums and response shapes come from generated OpenAPI types, not duplicated interfaces.
-- UI copy explains outcomes ("Link created", "This link has expired") rather than exposing status codes.
-
-## Implementation order
-
-1. Add Tailwind v4, shadcn/ui, React Router, TanStack Query, and testing tools.
-2. Build the app shell, providers, router, and design tokens.
-3. Implement create + copy + recent links with generated API types.
-4. Implement the analytics route and token recovery.
-5. Add E2E, accessibility, CSP, and performance budgets.
-6. Deploy the static build to Vercel.
+Required tests cover create replay/cancellation, code-specific conflicts, token changes and late responses, localStorage/cross-tab failures, expired/inactive/deleted states, UTC ranges and delayed analytics. Browser checks must include keyboard/screen-reader flows and a real preview API, not only mocked happy paths.

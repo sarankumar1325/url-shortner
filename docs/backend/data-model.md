@@ -1,41 +1,38 @@
 # Data Model
 
-Status: target design · Database: Neon Postgres 16+ · Migrations: Alembic
+Status: target design · Neon Postgres · SQLAlchemy 2.x async · Alembic
 
-## Entity relationship diagram
+## V1 entities
 
 ```mermaid
 erDiagram
-    USERS ||--o{ URLS : owns
     URLS ||--o{ CLICKS : receives
     URLS ||--o{ CLICK_DAILY : aggregates
-
-    USERS {
-        uuid id PK
-        citext email UK
-        timestamptz created_at
-    }
+    URLS ||--o| CREATE_REQUESTS : created_by
     URLS {
         bigint id PK
         varchar short_code UK
         text long_url
-        uuid owner_id FK
         bytea management_token_hash
-        boolean is_custom_alias
+        smallint token_hash_version
         boolean is_active
+        boolean is_blocked
         timestamptz expires_at
-        timestamptz created_at
-        timestamptz updated_at
         timestamptz deleted_at
     }
+    CREATE_REQUESTS {
+        bytea key_hash PK
+        bytea request_hash
+        bigint url_id FK
+        bytea encrypted_response
+        text encryption_key_id
+        timestamptz expires_at
+    }
     CLICKS {
-        bigint id PK
-        uuid event_id UK
+        uuid event_id PK
         bigint url_id FK
         timestamptz clicked_at
-        bytea ip_hash
-        text user_agent
-        text referer
+        text referer_origin
         char country
         varchar device_type
         boolean is_bot
@@ -49,207 +46,136 @@ erDiagram
     }
 ```
 
-`USERS` is not used in v1. It is shown because `URLS.owner_id` is designed to accept account ownership without a destructive migration.
+Accounts-ready means additive evolution, not an unused identity system. Do not create `users`, `citext`, or an unenforced `owner_id` in v1. When accounts arrive, add the identity table, nullable foreign key and listing index in an expand migration; anonymous rows naturally remain unowned.
 
-## Tables
+## Link schema
 
-### `urls`
-
-| Column | Type | Constraints | Notes |
-| --- | --- | --- | --- |
-| `id` | `bigint` | PK, identity | Internal only; never exposed as the short code |
-| `short_code` | `varchar(32)` | unique, not null, format check | Generated 7-char Base62 or custom alias |
-| `long_url` | `text` | not null, 1–8192 chars | Normalized absolute `http`/`https` URL |
-| `owner_id` | `uuid` | null, FK → `users.id` | Populated when accounts arrive |
-| `management_token_hash` | `bytea` | not null, 32 bytes | HMAC-SHA256 of the raw token |
-| `is_custom_alias` | `boolean` | not null, default false | Distinguishes generated codes from aliases |
-| `is_active` | `boolean` | not null, default true | Manual disable switch |
-| `expires_at` | `timestamptz` | null | Null means no expiry |
-| `created_at` | `timestamptz` | not null, default `now()` | UTC |
-| `updated_at` | `timestamptz` | not null, default `now()` | Updated by the application on every mutation |
-| `deleted_at` | `timestamptz` | null | Soft delete; alias stays reserved |
-
-The `users` table is created first in the migration so the nullable foreign key can reference it.
+Illustrative migration SQL; Alembic migrations and integration tests become authoritative when implemented.
 
 ```sql
 CREATE TABLE urls (
-    id                     BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    short_code             VARCHAR(32) NOT NULL,
-    long_url               TEXT NOT NULL,
-    owner_id               UUID REFERENCES users (id) ON DELETE SET NULL,
-    management_token_hash  BYTEA NOT NULL,
-    is_custom_alias        BOOLEAN NOT NULL DEFAULT FALSE,
-    is_active              BOOLEAN NOT NULL DEFAULT TRUE,
-    expires_at             TIMESTAMPTZ,
-    created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
-    deleted_at             TIMESTAMPTZ,
-    CONSTRAINT urls_short_code_uq UNIQUE (short_code),
-    CONSTRAINT urls_long_url_len CHECK (char_length(long_url) BETWEEN 1 AND 8192),
-    CONSTRAINT urls_short_code_format CHECK (short_code ~ '^[A-Za-z0-9_-]{3,32}$'),
-    CONSTRAINT urls_token_hash_len CHECK (octet_length(management_token_hash) = 32),
-    CONSTRAINT urls_expiry_after_creation CHECK (expires_at IS NULL OR expires_at > created_at)
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    short_code VARCHAR(32) COLLATE "C" NOT NULL UNIQUE,
+    long_url TEXT NOT NULL CHECK (char_length(long_url) BETWEEN 1 AND 8192),
+    management_token_hash BYTEA NOT NULL CHECK (octet_length(management_token_hash) = 32),
+    token_hash_version SMALLINT NOT NULL CHECK (token_hash_version > 0),
+    is_custom_alias BOOLEAN NOT NULL DEFAULT FALSE,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    is_blocked BOOLEAN NOT NULL DEFAULT FALSE,
+    expires_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    deleted_at TIMESTAMPTZ,
+    CHECK (
+        (is_custom_alias AND short_code ~ '^[a-z0-9][a-z0-9_-]{1,30}[a-z0-9]$')
+        OR (NOT is_custom_alias AND short_code ~ '^[A-Za-z0-9]{7}$')
+    ),
+    CHECK (expires_at IS NULL OR expires_at > created_at)
 );
-
-CREATE INDEX urls_owner_created_idx
-    ON urls (owner_id, created_at DESC)
-    WHERE owner_id IS NOT NULL;
-
-CREATE INDEX urls_active_expiry_idx
-    ON urls (expires_at)
-    WHERE is_active AND expires_at IS NOT NULL;
 ```
 
-The unique constraint is the correctness boundary for code allocation. Services rely on it instead of pre-checking for existence, which would race under concurrency.
+- IDs are internal, never required in browser JSON (avoids JavaScript bigint precision problems).
+- The case-sensitive unique constraint includes deleted rows; codes never change or get reused.
+- Service validation enforces reserved codes, safe URL schemes and expiry relative to request time; database checks are the final integrity boundary.
+- `is_blocked` is operator-owned and cannot be changed by a management token. Operators must audit block actions without logging targets or tokens.
+- State order: missing/deleted/blocked/inactive → `404`, then expired → `410`, otherwise redirect. Do not mutate active state during expiry cleanup.
 
-### `clicks`
+## Atomic create replay
 
-Raw click events. Written by the analytics drain, never on the redirect request path.
+```sql
+CREATE TABLE create_requests (
+    key_hash BYTEA PRIMARY KEY CHECK (octet_length(key_hash) = 32),
+    request_hash BYTEA NOT NULL CHECK (octet_length(request_hash) = 32),
+    url_id BIGINT UNIQUE REFERENCES urls(id),
+    encrypted_response BYTEA,
+    encryption_key_id TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    CHECK (expires_at > created_at),
+    CHECK (
+        (url_id IS NULL AND encrypted_response IS NULL AND encryption_key_id IS NULL)
+        OR (url_id IS NOT NULL AND encrypted_response IS NOT NULL AND encryption_key_id IS NOT NULL)
+    )
+);
+CREATE INDEX create_requests_expiry_idx ON create_requests(expires_at);
+```
 
-| Column | Type | Constraints | Notes |
-| --- | --- | --- | --- |
-| `id` | `bigint` | PK, identity | Insert order |
-| `event_id` | `uuid` | unique, not null | Idempotency key generated at redirect time |
-| `url_id` | `bigint` | not null, FK → `urls.id` | Cascades on hard delete |
-| `clicked_at` | `timestamptz` | not null | Event time, UTC |
-| `ip_hash` | `bytea` | null | 16 bytes, keyed hash; never the raw IP |
-| `user_agent` | `text` | null, ≤ 512 chars | Truncated |
-| `referer` | `text` | null, ≤ 2048 chars | Origin + path only; query and fragment stripped |
-| `country` | `char(2)` | null | ISO 3166-1 alpha-2 from Vercel geo headers |
-| `device_type` | `varchar(16)` | null | `desktop`, `mobile`, `tablet`, `bot`, `unknown` |
-| `is_bot` | `boolean` | not null, default false | Classifier result |
+The API requires a random UUIDv4 `Idempotency-Key`. Store its SHA-256 digest, a hash of canonical validated input, and the completed response encrypted with authenticated encryption (AEAD, unique nonce, key ID). Bind ciphertext to the key/request digests as associated data. The separate encryption key is not the token pepper.
+
+Reserve the key, allocate the link, fill the encrypted response, and commit **one Postgres transaction**. A reservation must never commit incomplete; test this application invariant with crash injection. Concurrent inserts on the same primary key serialize. On bounded lock-wait timeout return `409 request_in_progress`; the client retains the same key. A crash before commit rolls everything back; after commit, replay decrypts the original response, including its management token.
+
+The server enforces expiry on every replay (24 hours), regardless of cleanup timing. Delete expired replay rows in bounded batches. They are capabilities: never put plaintext keys or responses in logs. Backup retention may outlive the live 24-hour record; protect backups and retire old replay encryption keys after their live replay windows end. After expiry the same key may create a new link; clients must not automatically retry indefinitely.
+
+## Raw clicks
 
 ```sql
 CREATE TABLE clicks (
-    id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    event_id     UUID NOT NULL UNIQUE,
-    url_id       BIGINT NOT NULL REFERENCES urls (id) ON DELETE CASCADE,
-    clicked_at   TIMESTAMPTZ NOT NULL,
-    ip_hash      BYTEA,
-    user_agent   TEXT,
-    referer      TEXT,
-    country      CHAR(2),
-    device_type  VARCHAR(16),
-    is_bot       BOOLEAN NOT NULL DEFAULT FALSE,
-    CONSTRAINT clicks_ua_len CHECK (user_agent IS NULL OR char_length(user_agent) <= 512),
-    CONSTRAINT clicks_referer_len CHECK (referer IS NULL OR char_length(referer) <= 2048),
-    CONSTRAINT clicks_ip_hash_len CHECK (ip_hash IS NULL OR octet_length(ip_hash) = 16),
-    CONSTRAINT clicks_device_type CHECK (
-        device_type IS NULL OR device_type IN ('desktop', 'mobile', 'tablet', 'bot', 'unknown')
-    )
+    event_id UUID PRIMARY KEY,
+    url_id BIGINT NOT NULL REFERENCES urls(id) ON DELETE CASCADE,
+    clicked_at TIMESTAMPTZ NOT NULL,
+    ingested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    referer_origin TEXT CHECK (referer_origin IS NULL OR char_length(referer_origin) <= 2048),
+    country CHAR(2) CHECK (country IS NULL OR country ~ '^[A-Z]{2}$'),
+    device_type VARCHAR(16) NOT NULL CHECK (device_type IN ('desktop','mobile','tablet','bot','unknown')),
+    is_bot BOOLEAN NOT NULL
 );
-
-CREATE INDEX clicks_url_clicked_idx ON clicks (url_id, clicked_at DESC);
-CREATE INDEX clicks_clicked_idx ON clicks (clicked_at);
+CREATE INDEX clicks_url_clicked_idx ON clicks(url_id, clicked_at);
+CREATE INDEX clicks_clicked_idx ON clicks(clicked_at);
 ```
 
-`event_id` uniqueness makes the drain idempotent: replaying a batch cannot duplicate a click. `ON DELETE CASCADE` is only relevant for hard deletes, which v1 does not perform.
+No raw IP, persistent IP hash, raw user agent, referrer path, query, or fragment is persisted. V1 reports event counts and dimensions, not unique visitors. The stream briefly carries a bounded UA for worker classification; Postgres stores only the classification. Country is coarse platform metadata, not verified identity.
 
-### `click_daily`
+`event_id` is generated once per successful GET before enqueue; duplicate delivery must reuse it. Distinct real requests are distinct events even if they come from the same browser.
 
-Pre-aggregated daily counts. Read by the analytics API for completed days.
-
-| Column | Type | Constraints |
-| --- | --- | --- |
-| `url_id` | `bigint` | PK, FK → `urls.id` |
-| `day` | `date` | PK, UTC calendar day |
-| `clicks` | `bigint` | not null, default 0 |
-| `human_clicks` | `bigint` | not null, default 0 |
-| `bot_clicks` | `bigint` | not null, default 0 |
+## Daily totals
 
 ```sql
 CREATE TABLE click_daily (
-    url_id        BIGINT NOT NULL REFERENCES urls (id) ON DELETE CASCADE,
-    day           DATE NOT NULL,
-    clicks        BIGINT NOT NULL DEFAULT 0,
-    human_clicks  BIGINT NOT NULL DEFAULT 0,
-    bot_clicks    BIGINT NOT NULL DEFAULT 0,
-    PRIMARY KEY (url_id, day)
+    url_id BIGINT NOT NULL REFERENCES urls(id) ON DELETE CASCADE,
+    day DATE NOT NULL,
+    clicks BIGINT NOT NULL CHECK (clicks >= 0),
+    human_clicks BIGINT NOT NULL CHECK (human_clicks >= 0),
+    bot_clicks BIGINT NOT NULL CHECK (bot_clicks >= 0),
+    PRIMARY KEY (url_id, day),
+    CHECK (clicks = human_clicks + bot_clicks)
 );
 ```
 
-Rollups are recomputed from raw events for affected `(url_id, day)` pairs after each drain. Recomputing, rather than incrementing, keeps retries idempotent.
+In one transaction, insert raw events with `ON CONFLICT (event_id) DO NOTHING RETURNING ...`, aggregate **only newly inserted rows**, then atomically add those deltas to `click_daily`. Replays insert no rows and add no counts. Concurrent drains safely increment the same daily row; do not recompute-and-overwrite totals from concurrent snapshots. Upsert pairs in `(url_id, day)` order to reduce deadlocks, and retry rolled-back worker transactions within the job deadline.
 
-### `users` (future)
+See [analytics.md](analytics.md) for the transaction and acknowledgment protocol. Reads sum rollups for all days (including today); do not also add today's raw events and double-count them. Raw rows supply breakdowns for up to 90 days.
 
-```sql
-CREATE EXTENSION IF NOT EXISTS citext;
+## Retention and access patterns
 
-CREATE TABLE users (
-    id          UUID PRIMARY KEY,
-    email       CITEXT NOT NULL UNIQUE,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-```
-
-When accounts ship, `urls.owner_id` is populated for authenticated creates. Anonymous links keep `owner_id = NULL`. No backfill is required.
-
-## Invariants
-
-1. `short_code` is globally unique, including soft-deleted rows.
-2. A code is either generated (exactly 7 Base62 characters) or a custom alias (lowercase, 3–32 characters).
-3. Raw management tokens are never stored or logged.
-4. A redirect is allowed only when `is_active`, `deleted_at IS NULL`, and `expires_at IS NULL OR expires_at > now()`.
-5. Every click belongs to an existing URL.
-6. `event_id` is unique across all clicks.
-7. All timestamps are stored in UTC.
-8. Analytics read models are derived; they can be rebuilt from `clicks` while raw events are retained.
-
-## Access patterns
-
-| Operation | Query shape | Index |
+| Data | Retention | Query/index or cleanup |
 | --- | --- | --- |
-| Resolve redirect | `WHERE short_code = $1 AND deleted_at IS NULL` | `urls_short_code_uq` |
-| Fetch managed link | `WHERE short_code = $1` | `urls_short_code_uq` |
-| List future account links | `WHERE owner_id = $1 ORDER BY created_at DESC` | `urls_owner_created_idx` |
-| Expiry cleanup | `WHERE is_active AND expires_at < now()` | `urls_active_expiry_idx` |
-| Recent raw analytics | `WHERE url_id = $1 AND clicked_at >= $2` | `clicks_url_clicked_idx` |
-| Retention delete | `WHERE clicked_at < now() - interval '90 days'` in batches | `clicks_clicked_idx` |
-| Daily analytics | `WHERE url_id = $1 AND day BETWEEN $2 AND $3` | primary key |
+| Links and reserved codes | Indefinite until an explicit policy changes | Unique `short_code` lookup |
+| Soft-deleted links | No public or analytics access; code retained | Token-valid repeat DELETE may return 204 |
+| Replay responses | 24 hours of API replay | `key_hash`; bounded expiry cleanup |
+| Accepted event age | At most 24 hours old; no more than 5 minutes ahead | Checked before raw insert |
+| Raw clicks | Last 90 UTC calendar days, including today | `(url_id, clicked_at)` queries; batched retention delete |
+| Daily totals | 2 years | `(url_id, day)`; batched retention delete |
+| Stream/dead letters | Bounded by age, bytes, and count | See analytics pipeline |
 
-## Data lifecycle
+The raw-event cutoff is 00:00 UTC on `today_utc - 89 days`, not a rolling 90 × 24-hour boundary. Reads enforce it even if cleanup is delayed; maintenance deletes older rows using the same cutoff. Monitor cleanup lag separately from the API's visible window.
 
-| Data | Retention | Mechanism |
-| --- | --- | --- |
-| Active links | Indefinite | — |
-| Expired links | Kept, redirects return `410` | Daily cleanup may set `is_active = false` after a grace period |
-| Deleted links | Metadata and analytics retained | Soft delete; alias remains reserved |
-| Raw clicks | 90 days | Batched `DELETE` from the cleanup job |
-| Daily rollups | 2 years | Cleanup job |
-| Stream entries | Until acknowledged | `MAXLEN ~ 1,000,000` safety cap |
-| Idempotency responses | 24 hours | Redis TTL |
+The 24-hour event acceptance horizon is well inside the 90-day deduplication retention. An old stream replay cannot reintroduce a deleted raw event and double-count a preserved rollup. Never extend replay age past deduplication retention without redesigning the ledger.
 
-Deleting a link does not erase analytics immediately. A future account-level "delete my data" flow will hard-delete rows and cascade clicks.
+Operators need an authorized erasure procedure before launch: purge target/event data while retaining a minimal non-reusable code tombstone; document backup expiry and privacy-request handling. A normal DELETE disables a link, not a promise of immediate erasure from backups.
 
-## Growth and partitioning
+## Growth assumptions
 
-Initial sizing:
+Start with one region, a small runtime connection pool and indexed tables. Measure rather than claim supported RPS.
 
-- 1 million links ≈ 300–500 MB with indexes and tokens.
-- 10 million clicks ≈ 1.5–2.5 GB with indexes.
-- 1 million links × 30 days of rollups ≈ 30 million small rows.
+- At 10 redirects/s, raw events reach 864,000/day and 77.76 million over 90 days. Rich-event retention can dominate cost even for a small link catalogue.
+- Estimate storage from measured row/index sizes and actual active link-days, not links × every calendar day. Query `pg_total_relation_size` and sample payload sizes.
+- Revisit retention and analytics storage before the database/queue budget is exhausted. Partitioning is not a free switch: Postgres partitioned uniqueness must include partition keys. Keeping global `event_id` deduplication requires a separate ledger or an explicitly redesigned composite key.
+- Use `EXPLAIN (ANALYZE, BUFFERS)` on representative analytics ranges. Do not add owner/expiry indexes before a corresponding workload exists.
 
-Plan:
+## Migration and recovery gates
 
-- Keep `clicks` as a single table until roughly 50 million rows or 20 GB.
-- Partition `clicks` monthly by `clicked_at` when that threshold is near. The redirect path never queries the full history.
-- `click_daily` remains unpartitioned; it grows linearly with links × active days.
-- Use Neon autoscaling and monitor index bloat with `pg_stat_user_indexes`.
-
-## Migrations
-
-- Alembic is the only schema change mechanism. No application-side `CREATE TABLE`.
-- Use expand/contract for zero-downtime changes:
-  1. Add nullable columns or new tables.
-  2. Backfill in bounded batches.
-  3. Switch reads and writes.
-  4. Remove old structures in a later release.
-- Migrations run in CI against a disposable database and in a dedicated deploy job against Neon. They never run on function cold start.
-- Every migration must be reversible or have a documented forward fix.
-- Preview deployments use separate Neon branches and never migrate production.
-
-## Data integrity checks
-
-- `alembic check` in CI detects model/migration drift.
-- Integration tests assert unique-conflict behavior for codes and idempotent ingestion for clicks.
-- Nightly job compares `click_daily` totals with raw counts for the last 7 days and alerts on drift.
+- Alembic only; no schema creation on cold start. Run migrations once in a controlled job using a separate DDL role and direct database connection.
+- Expand/contract changes; keep old deployments compatible through rollback. Failed migrations require a tested forward fix or safe rollback, never blind downgrade.
+- Disposable Postgres/Redis integration tests cover collisions, concurrent idempotency, duplicate/concurrent ingestion, retention boundaries, and link state.
+- Reconcile recent rollups against raw counts as a diagnostic. Repairs require serialized maintenance; no concurrent full-table recompute that overwrites live deltas.
+- Verify backups and a restore into an isolated database before launch; provisional RPO ≤24 hours and RTO ≤4 hours must match the purchased plan and a measured restore drill. Analytics loss limits are separate.

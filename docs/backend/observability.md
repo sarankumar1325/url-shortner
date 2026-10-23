@@ -1,212 +1,106 @@
-# Observability and SLOs
+# Observability, SLOs and Recovery
 
-Status: target design · Related: [Caching and scaling](caching-and-scale.md) · [Deployment](deployment.md)
+Status: proposed targets, not measured results · [Capacity](caching-and-scale.md) · [Deployment](deployment.md)
 
-## Principles
+## Measurement definitions
 
-- Every request is traceable by `request_id`.
-- Logs are structured and safe to retain: no tokens, raw IPs, or full URLs.
-- Metrics answer "is the redirect path healthy?" before "is the database busy?".
-- Alerts are tied to user-visible symptoms, not raw resource usage.
-- Dashboards exist for both the redirect hot path and the analytics pipeline.
+SLOs must measure user outcomes rather than treating every non-5xx response as success. Separate public redirects, create/manage, background ingestion and frontend availability.
 
-## Structured logs
-
-Emit one JSON object per request and per significant background action.
-
-```json
-{
-  "ts": "2026-10-23T12:00:00.123Z",
-  "level": "info",
-  "service": "urlshortner-api",
-  "env": "production",
-  "version": "2026.10.23-1",
-  "request_id": "01JQ9Z3K4M8YV2R6T0W7X1N5B8",
-  "method": "GET",
-  "path": "/{code}",
-  "route": "redirect",
-  "status": 302,
-  "duration_ms": 12,
-  "cache": "hit",
-  "short_code": "sysdesign",
-  "country": "US",
-  "rate_limited": false,
-  "error_code": null
-}
-```
-
-Rules:
-
-- Use the platform request ID when present; otherwise generate a ULID.
-- Return `X-Request-ID` to the caller and include it in every error response.
-- Never log `Authorization`, `X-Management-Token`, raw management tokens, raw IPs, or full destination URLs.
-- Destination URLs may contain sensitive query parameters; log only the short code.
-- Errors log `error_code`, exception class, and stack trace at `error` level, but the client receives only a generic Problem Details response.
-- Stream drain logs include batch size, inserted count, duplicate count, duration, and lag.
-
-## Metrics
-
-Use Vercel Observability, the Upstash and Neon dashboards, and application counters emitted through OpenTelemetry or structured logs.
-
-### Request metrics
-
-| Metric | Type | Labels |
+| Objective | Initial target | Definition |
 | --- | --- | --- |
-| `http_requests_total` | counter | `route`, `method`, `status` |
-| `http_request_duration_ms` | histogram | `route`, `cache` |
-| `redirect_cache_total` | counter | `result=hit\|miss\|negative\|error` |
-| `rate_limit_total` | counter | `scope`, `result=allow\|deny\|degraded` |
-| `db_errors_total` | counter | `operation` |
-| `redis_errors_total` | counter | `operation` |
+| Redirect availability | 99.9% over rolling 30 days | Eligible active/nonexpired requests returning correct 302; unexpected 404/410/429, timeouts and 5xx count as failure |
+| Redirect warm latency | p95 <100 ms, p99 <250 ms | End-to-end handler time including limiter/cache/enqueue, not just SQL |
+| Create availability | 99.5% over rolling 30 days | Valid within-policy submissions with a successful create/replay; infrastructure failures count |
+| Create warm latency | p95 <400 ms | Includes rate limit, transaction, encryption and response |
+| Analytics warm query latency | p95 <800 ms | Includes auth, rollups and clipped breakdowns |
+| Captured-event freshness | 95% ingested within 2 minutes | Accepted events' `ingested_at - clicked_at`; excludes known failed capture, reported separately |
 
-### Analytics metrics
+Include cold starts in availability and overall latency dashboards; report warm/cold and client-observed latency separately, not by dropping cold traffic from reports. Invalid/expired requests and intentional policy denials are excluded from eligibility, not labelled successful redirects. Maintain known-active canary links and synthetic GET/HEAD probes to detect incorrect 404s that status counters alone cannot classify.
 
-| Metric | Type | Meaning |
-| --- | --- | --- |
-| `analytics_enqueue_total` | counter | `result=ok\|timeout\|error` |
-| `analytics_stream_length` | gauge | Entries waiting to drain |
-| `analytics_pending_age_seconds` | gauge | Age of the oldest pending entry |
-| `analytics_drain_duration_ms` | histogram | Drain invocation duration |
-| `analytics_events_total` | counter | `result=inserted\|duplicate\|malformed` |
-| `analytics_last_success_timestamp` | gauge | Freshness |
+These targets need load/deployed-region validation. An accepted-event freshness SLO does not prove capture completeness. Report enqueue failures/unknown outcomes independently. A 99.9% time-based 30-day budget is 43.2 minutes; a **request-based** budget is 0.1% of eligible requests, not a fixed amount of downtime.
 
-### Database and cache metrics
+## Safe structured logging
 
-Use Neon for connections, CPU, IOPS, slow queries, and storage; use Upstash for command latency, errors, and memory.
+Generate/validate bounded UUID request IDs and echo `X-Request-ID`. Log JSON with service, environment, commit SHA, route template, method, status, duration, cache outcome and error code. Avoid raw request paths/query strings and per-link logs by default.
 
-- Neon active connections vs pool limit.
-- Neon p95 query latency for redirect lookups.
-- Upstash p95 command latency and error rate.
-- Cache evictions and memory usage.
+Never log destinations, bodies, `Authorization`, `X-Management-Token`, `Idempotency-Key`, cookies, IPs, UA/referrer strings, encryption material or validation input. SQL exception parameters can contain URLs/tokens; configure scrubbing rather than blindly dumping exceptions. Audit platform access logs and tracing integrations too.
 
-## Service level objectives
+Use route/status/error enums as metric labels. Never label metrics with short codes, IP hashes, token values, request IDs or URLs. Sampled controlled diagnostic logs may use a short code only when operationally necessary and covered by access/retention policy.
 
-| SLO | Target | Measurement |
-| --- | --- | --- |
-| Redirect availability | 99.9% monthly | Non-5xx responses / valid redirect requests |
-| Redirect latency | p95 < 100 ms, p99 < 250 ms | Server duration, cache hit or miss |
-| Redirect cache hit ratio | > 95% | Hits / (hits + misses) for existing codes |
-| Create availability | 99.5% monthly | Non-5xx create responses |
-| Create latency | p95 < 400 ms | Server duration |
-| Analytics API latency | p95 < 800 ms | Server duration |
-| Analytics freshness | 95% of events within 2 minutes | Event time to rollup commit |
-| Error rate | < 0.1% of redirects | 5xx / total |
+## Metrics and dashboards
 
-The 99.9% monthly error budget is about **43 minutes**. Exhausting it pauses non-critical changes until the cause is addressed.
+**Requests and dependencies**
 
-## Distributed tracing
+- Request counts, eligible success/failure and duration by route/method/status.
+- Cache hits/misses/errors/expired deadlines, separately for known existing-code traffic.
+- Limiter allow/deny/degraded results by scope; create budget usage and rejected unauthenticated management attempts.
+- Redis command latency/errors, DB pool wait/active connections, query latency, transaction aborts, collision retries.
+- Cold starts and function concurrency; edge denials and client timeouts where measurable.
 
-- OpenTelemetry SDK with OTLP export where supported by the platform.
-- Propagate `traceparent` and `X-Request-ID`.
-- Spans: HTTP request → rate limit → Redis GET → Postgres SELECT (only on miss) → stream append.
-- Sample 10% in production and 100% in preview; always sample errors.
-- Do not attach full destination URLs, tokens, or IPs as span attributes.
+**Pipeline**
 
-## Dashboards
+- Enqueue attempts: acknowledged, timed-out/uncertain, failed, intentionally skipped.
+- Unread count/age, pending count/oldest age, stream bytes/entries, capacity percentage, trimmed-pending IDs.
+- Committed inserted/duplicate/rejected events, drain time/throughput, successful drain time, capture-to-ingest latency.
+- ACK/delete failures, retention backlog, redacted poison-event reasons.
+- Remember: XLEN includes retained acknowledged entries until deleted, and XPENDING excludes never-read entries. Neither alone measures backlog.
 
-**Redirect health**
+**Product/operations**
 
-- Requests per second and status mix.
-- p50/p95/p99 latency split by cache hit/miss.
-- Cache hit ratio.
-- 429 rate by scope.
-- Redis and Postgres error rates.
+- Create and redirect volume, daily analytics storage growth, projected vendor command/storage spend.
+- No unique-visitor claim. Bot/human counts are estimates and diagnostic, not verified identity.
+- A sparse link's `last_processed_at` does not indicate queue health; global pipeline telemetry does.
 
-**Write path**
+## Tracing
 
-- Create rate and error codes.
-- Collision retry count.
-- Alias conflict rate.
-- DB pool wait time.
-
-**Analytics pipeline**
-
-- Stream length and oldest pending age.
-- Drain duration and inserted/duplicate counts.
-- Malformed event rate.
-- Time since last successful drain.
-- Analytics API latency.
-
-**Business signals**
-
-- Links created per hour.
-- Redirects per hour.
-- Expired-link 410 rate.
-- Top error codes.
-
-Avoid per-link dashboards by default; they can leak traffic patterns and create cardinality problems.
+Use bounded OpenTelemetry spans for HTTP → limiter → cache → DB miss → enqueue, with sensitive attributes removed. A 10% head sample drops unsampled requests before an error is known: it cannot guarantee "all errors traced". Always capture redacted error logs; use tail sampling only if an actual collector is provisioned and its cost/retention reviewed. Tracing is optional until it demonstrably helps diagnose the service.
 
 ## Alerts
 
-| Severity | Condition | First action |
+Tune thresholds against representative load; low-traffic services need canaries and minimum sample counts.
+
+| Severity | Trigger | First action |
 | --- | --- | --- |
-| P1 | Redirect 5xx > 1% for 5 minutes | Check Neon/Upstash status; roll back recent deploy |
-| P1 | Redirect availability below 99.5% over 15 minutes | Page on-call; inspect dependency health |
-| P1 | Drain has not succeeded for 30 minutes | Run drain manually; inspect Redis/Postgres |
-| P2 | Redirect p95 > 200 ms for 10 minutes | Check cache hit ratio and DB latency |
-| P2 | Cache hit ratio < 85% for 15 minutes | Inspect TTLs, invalidation, hot keys |
-| P2 | Create 5xx > 2% for 10 minutes | Check DB writes and collision retries |
-| P2 | Stream length > 100,000 or pending age > 10 minutes | Increase drain frequency or batch size |
-| P3 | 429 rate doubles week over week | Review abuse and limits |
-| P3 | Cleanup job fails twice | Inspect retention job logs |
+| P1 | Sustained eligible redirect errors or active canary failure | Inspect recent deploy, edge policies, Redis/Neon health |
+| P2 | Redirect p95 >200 ms for 10 minutes | Split cold starts, cache latency and DB pool waiting |
+| P2 | No successful drain for 15 minutes, or oldest unprocessed age >10 minutes | Check cron/auth and bounded manual drain |
+| P2 | Stream/DB/command budget near configured capacity | Measure backlog growth, throughput and spend; avoid blindly increasing caps |
+| P2 | Create/management limiter degraded | Restore Redis; keep expensive routes fail-closed |
+| P2 | Cache invalidation failure during takedown | Verify edge denial on all backend hosts |
+| P3 | Retention lag, dependency audit issue, rising policy denials | Investigate before next release |
 
-Alerts must include a runbook link and the affected environment. Avoid alerting on single cold starts or isolated 4xx spikes.
+For availability, prefer multi-window error-budget burn alerts over single 4xx spikes. Pause nonessential releases when the agreed budget is exhausted; fixes/recovery remain allowed.
 
-## Health and readiness
+## Health versus readiness
 
-| Endpoint | Checks | Use |
-| --- | --- | --- |
-| `/health` | Process is running; no dependencies | Liveness and uptime monitor |
-| `/ready` | `SELECT 1` and Redis `PING`, 1 s timeout each | Deployment smoke test and external monitor |
-
-`/ready` returns `503` when a required dependency is unavailable, with component status but no internal details. Vercel does not use these endpoints for routing; they are for operators and smoke tests.
-
-## Release and error tracking
-
-- Include the deployed commit SHA in `version`.
-- Use Vercel deployment markers to correlate latency/error changes with releases.
-- Sentry (optional) captures backend exceptions with `request_id`, `route`, and `release`; PII is scrubbed.
-- Frontend Web Vitals and errors are covered in [frontend/performance.md](../frontend/performance.md).
+- `/health`: process/app liveness, no dependency calls, safe for frequent probes.
+- `/ready`: bounded DB check and Redis check in parallel, detailed internal telemetry but only generic public ready/not-ready response. Redis failure may still allow some redirects but blocks readiness for full functionality.
+- Vercel does not automatically route traffic using these endpoints. External health monitoring and deployment smoke tests must be configured explicitly.
 
 ## Runbooks
 
 ### Redis unavailable
 
-1. Redirects fall back to Postgres; expect higher latency.
-2. Rate limiting fails open; watch for abuse.
-3. Check Upstash status and credentials.
-4. If the outage is prolonged, consider temporarily increasing Neon capacity.
+Redirects fall back to bounded DB reads; creation, management and analytics fail closed. Monitor DB pool saturation and lost/uncertain enqueue counts. Suppress repeated optional Redis attempts per request, repair credentials/network/service health, and do not remove rate limits globally as a shortcut.
 
 ### Postgres unavailable
 
-1. Cache hits continue to serve; cache misses and writes fail.
-2. Check Neon status, connection limits, and recent migrations.
-3. Do not flush the Redis cache; it is the only serving path.
-4. Roll back a bad migration if that is the cause.
+Valid cache hits survive only until the absolute 60-second deadline; misses and management return `503`. Do not flush remaining cache or extend stale TTLs. Inspect migrations, connections and provider health. Restore service before the cache-age window closes where possible; no promise of indefinite cache-only availability.
 
 ### Analytics backlog
 
-1. Check `analytics_stream_length` and pending age.
-2. Invoke the drain endpoint manually with the cron secret.
-3. Verify the cron schedule is enabled and `CRON_SECRET` matches.
-4. Increase batch size or schedule frequency if load has grown.
+Inspect unread and pending age, not just XLEN. Verify the plan supports the schedule, unprefixed CRON_SECRET matches, and jobs target production. A bounded authorized manual drain can recover; it must tolerate concurrency and duplicate delivery. Do not ACK/delete uncommitted batches or blindly trim the stream to clear an alert.
 
-### Cache hit collapse
+### Suspected malicious link
 
-1. Confirm keys are being written with the expected prefix and TTL.
-2. Check for mass invalidation or a key-format change in a recent deploy.
-3. Inspect hot keys and Upstash eviction policy.
-4. Warm critical links if needed by issuing redirects or a bounded job.
+Verify the report without fetching the destination from privileged infrastructure. Apply edge denial for the code on both public backend hosts, then block in the DB and invalidate. Record the action without full target/token data. Validate public rejection and retain an authorized unblock/audit process.
 
-### Elevated 429s
+### Bad deployment / data incident
 
-1. Identify scope and whether denials concentrate on one hashed client.
-2. Check for a scraper or a broken client retry loop.
-3. Apply a WAF rule or adjust limits; avoid disabling limits globally.
+Rollback code only if old code is compatible with migrated schema and secret versions. A rollback is not a data restore. Restore a backup into an isolated database, verify canary links/token hashes, reconcile deployment versions, and explicitly authorize switching data endpoints.
 
-### Bad release
+Provisional recovery objectives: durable link data RPO ≤24 hours, RTO ≤4 hours; verify plan capabilities and measure a restore drill before claiming them. Replays/live secrets and analytical aggregates have different retention/recovery constraints. Retest restore and operator access periodically.
 
-1. Roll back in Vercel.
-2. Confirm migrations are backward compatible.
-3. Verify `/health`, `/ready`, and a canary redirect.
-4. Add a regression test before redeploying.
+## Release evidence
+
+Record load assumptions, observed RPS/latency, cold starts, Redis operations/cost, worker catch-up capacity and measured restore time with the release. A green `/health` or unit test is not proof the URL shortener, privacy controls or deployment is production-ready.

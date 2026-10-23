@@ -1,158 +1,105 @@
-# URL Shortener — System Design Docs
+# URL Shortener — Design and Delivery Plan
 
-Status: design baseline · Last updated: 2026-10-23
+Reviewed: 2026-10-23 · **Target design, not a production-readiness claim**
 
-This directory is the source of truth for the product scope, architecture, API, data model, and deployment of the URL shortener. The code is implemented in two independent Vercel projects:
+## Scope and decisions
 
-| Project | Local path | Stack | Vercel root directory |
-| --- | --- | --- | --- |
-| API | `backend/` | Python 3.12, FastAPI, uv | `backend` |
-| Web app | `urlshortner/` | Bun, Vite 8, React 19, TypeScript | `urlshortner` |
+Preserve the agreed stack and product: anonymous, accounts-ready URL creation with generated/custom codes, expiry, token-based management and rich asynchronous click analytics. Host FastAPI and the Vite SPA as two Vercel projects in one repository.
 
-## Product scope
-
-**V1 is anonymous, but accounts-ready.**
-
-Included:
-
-- Create a short link with a generated or custom alias.
-- Optional expiry.
-- Fast redirects from `short.example/{code}`.
-- Anonymous link management with a one-time management token.
-- Rich click analytics: referrer, device, country, bot flag, and daily totals.
-- Abuse controls: validation, rate limits, reserved aliases, and hashed IPs.
-
-Designed for later, not built in v1:
-
-- User accounts, dashboards, and teams.
-- Custom domains per user.
-- QR codes, bulk import, and link-in-bio pages.
-- Safe Browsing / malware scanning.
-- Multi-region active-active writes.
-
-Non-goals:
-
-- General-purpose file hosting.
-- Tracking pixels or cross-site user tracking.
-- Guaranteed analytics exactly-once semantics.
-
-## Fixed decisions
-
-| Decision | Choice | Rationale |
+| Concern | Choice | Tradeoff |
 | --- | --- | --- |
-| Hosting | Two Vercel projects, one repository | Independent deploy and scaling for API and static web app |
-| Database | Neon Postgres (pooled) | Durable, relational, serverless-friendly connections |
-| Cache and limits | Upstash Redis | Shared redirect cache, rate limits, and analytics stream |
-| Short codes | Random 7-character Base62 with collision retry | Stateless generation fits serverless; unique constraint guarantees correctness |
-| Redirect status | `302 Found` with `Cache-Control: no-store` | Preserves click analytics and allows link changes |
-| Anonymous management | 256-bit token, shown once, stored as a hash | Enables edit/delete/analytics without accounts |
-| Analytics | Async rich events via Redis Stream, batched into Postgres | Keeps the redirect path fast and failure-tolerant |
-| Frontend | React SPA, Tailwind v4, shadcn/ui, TanStack Query | Static delivery, typed contracts, accessible components |
+| Backend | Python 3.12, FastAPI, uv; modular monolith | Simple deployment, shared resources between redirect/API/worker |
+| Frontend | Bun, Vite, React/TypeScript; planned Tailwind v4 + shadcn/ui | Static delivery; no server-rendered route status or private server secrets |
+| Durable state | Neon Postgres, SQLAlchemy/Alembic planned | Connection and analytics-storage budgets matter |
+| Cache/limits/buffer | Upstash Redis | Network/command costs; not the durable source of link ownership |
+| Codes | Random 7-character Base62, DB unique constraint and retries | Public identifiers, not authentication secrets |
+| Management | Per-link 256-bit token, hash versioning | Anonymous users must preserve their capability |
+| Create retries | Required UUIDv4 key, atomic Postgres encrypted replay for 24 hours | Replay key is also sensitive; encryption/cleanup are necessary |
+| Redirect cache | Positive-only cache-aside, max age 60 seconds | Bounded staleness, not immediate delete/revocation |
+| Analytics | Bounded awaited enqueue, asynchronous idempotent SQL ingestion | Best-effort capture; eventual results and explicit potential loss |
+| UI state | Generated OpenAPI types, TanStack Query with auth-scoped private caches | Must clear data when credentials change/are forgotten |
 
-Detailed tradeoffs live in [`adr/`](adr/).
+No accounts, teams, custom user domains, QR codes, bulk creation, automatic malware fetching, multi-region writes or microservices in v1. Accounts-ready means future additive migrations, not creating unused user tables today.
+
+## Current implementation
+
+| Area | Exists now | Not yet implemented |
+| --- | --- | --- |
+| Backend | uv project, app factory, typed basic settings, CORS middleware, `/health`, one test, Ruff | URLs, DB/migrations, Redis, auth, errors, rate limits, workers |
+| Frontend | Default Vite React/TS scaffold, Bun lock, lint/build scripts | Product screens, router, strict TS enforcement, Tailwind/shadcn, queries, tests |
+| Deployment | `tool.vercel.entrypoint` declaration | Verified Vercel entrypoint/build, projects, domains, env, schedule, cloud data |
+| Security/operations | Basic environment files/ignore rules | Production debug/docs restrictions, exact noncredentialed CORS, observability, backup/erasure/takedown controls |
+
+In particular, the scaffold still allows credentialed CORS/all methods and exposes interactive docs regardless of environment. A successful local health test does not establish deployability or production security.
 
 ## System context
 
 ```mermaid
 flowchart LR
-    browser[User browser] -->|loads app| web[Web app<br/>Vite + React<br/>Vercel CDN]
-    browser -->|REST /api/v1| api[FastAPI<br/>Vercel Function]
-    browser -->|GET /{code}| api
-    api -->|cache-aside| redis[(Upstash Redis)]
-    api -->|SQL| db[(Neon Postgres)]
-    api -->|XADD click event| redis
-    cron[Vercel Cron / QStash] -->|drain every minute| api
-    api -->|batch insert + rollups| db
+    Browser[Browser] --> Web[Vite SPA on Vercel CDN]
+    Browser -->|REST and redirects| API[FastAPI on Vercel]
+    API -->|links and create replay| PG[(Neon Postgres)]
+    API -->|limits and positive cache| Redis[(Upstash Redis)]
+    API -->|bounded click enqueue| Redis
+    Schedule[Authenticated production scheduler] --> Drain[Bounded drain in FastAPI]
+    Drain --> Redis
+    Drain -->|deduplicate raw events and atomically add rollups| PG
 ```
 
-The redirect path is intentionally short: **rate limit → Redis → Postgres on miss → enqueue click → redirect**. Analytics work never blocks the user's redirect.
+- `backend/` is one Vercel root; `urlshortner/` is the other.
+- Example web origin: `app.short.example`; API: `api.short.example`; redirect: `short.example`. These are placeholders, not provisioned domains.
+- Local: frontend `http://localhost:5173`, API `http://127.0.0.1:8000`.
+- Previews: exact allowed frontend origin, isolated sanitized Neon data and separate Upstash data/namespace. A copied production database is not safe preview isolation.
+- Two backend hostnames still reach the same app; takedown and routing policy must cover both.
 
-## Request flows
+## Critical invariants
 
-**Create a link**
+1. Unique codes are enforced in Postgres, including deleted rows; aliases are never reused.
+2. Link creation and its encrypted replay result commit together; a lost HTTP response does not create a second link or lose management access on same-key retry.
+3. Cache invalidation cannot eliminate refill races. Anchor cache expiry to the original DB-read start and disclose the 60-second bound. Urgent malicious-link revocation requires verified edge denial or authoritative DB checks.
+4. Authentication never falls back to cache or fails open. Redirect limiting may degrade; creation/management/analytics limiting does not.
+5. Only newly inserted event IDs contribute rollup deltas, within the same transaction; ACK/delete follows commit. Worker overlap must be safe without relying on a lease.
+6. Successful GET redirects may count clicks; HEAD/OPTIONS/errors do not. The awaited enqueue consumes a small latency budget; background persistence is asynchronous.
+7. Rich analytics are in v1: referrer origin, device, country and heuristic bot flag. No permanent IP identifier or unique-visitor claim.
+8. Analytics uses UTC date-only `[from, to)` intervals. Missing dates are zero-filled; 90-day breakdown truncation and uncertain freshness are visible.
+9. Tokens/replay keys never appear in URLs, logs or query keys; all API responses are HTTP `no-store`. Token removal clears private UI caches.
+10. No claim of supported RPS, exact one-minute freshness or deployed functionality until measured and verified.
 
-1. The app posts a validated URL and optional alias to `POST /api/v1/links`.
-2. The API rate-limits the request, generates a code, and inserts the row.
-3. A unique index resolves rare collisions; the API retries with a new code.
-4. The API returns the short URL and a one-time management token.
-5. The token is hashed in Postgres; only the client keeps the raw value.
+## Implementation plan
 
-**Follow a link**
+All future milestones require tests with the feature, not a final testing phase. Keep changes independently reviewable and avoid pre-creating unused abstractions.
 
-1. `GET /{code}` hits the API.
-2. The IP is rate-limited using a hashed key.
-3. Redis returns the cached target; on a miss the API reads Postgres and repopulates the cache.
-4. Expiry and active state are checked before redirecting.
-5. A click event is appended to a Redis Stream.
-6. The API returns `302` with `Cache-Control: no-store`.
+| Phase | Deliverable | Exit criteria |
+| --- | --- | --- |
+| 0 — baseline | Existing scaffolds and this design | Local commands reproducible; target-vs-current differences documented |
+| 1 — runtime + persistence | Production settings, offline schema generation, Neon models/Alembic, validated Vercel entrypoint | Isolated preview `/health`; TLS/pooling checked; migrations tested on disposable DB; debug/docs/CORS guarded |
+| 2 — durable link vertical slice | Create/replay, generated/custom code, expiry, token management, direct DB GET/HEAD redirect | Collision + simultaneous-key + crash/replay tests; state/validation boundaries; token ciphertext never logged |
+| 3 — fast and bounded redirect | Upstash limiter/cache/enqueue boundaries, operator block handling | Cache refill/delete races, Redis outage and bounded DB overload tested; no public anonymous creation before limits exist |
+| 4 — rich analytics | Stream consumer, incremental rollups, breakdown API, cleanup, authenticated scheduler | Concurrent/replayed batch tests; crash recovery; 24-hour acceptance vs 90-day dedupe; throughput/capacity and scheduler budget validated |
+| 5 — usable frontend | Tailwind/shadcn shell, create/copy/token backup, management, rich analytics | Typed contract, UTC date UX, storage failures, retry behavior, private-cache clearing, keyboard/a11y and browser tests |
+| 6 — production release | CI gates, telemetry, budgets, privacy/takedown/erasure, restore/rollback, deployment | Measured load/latency/cost, supported cron plan, isolated previews, restore drill, public-host canaries; explicit deployment approval |
 
-**Read analytics**
+Frontend shell work may proceed after phase 1; API-dependent features use the versioned contract after phase 2. Do not add speculative KGS, distributed locks, multi-region replication or account infrastructure without a measured requirement.
 
-1. The app sends the management token to `GET /api/v1/links/{code}/analytics`.
-2. The API verifies the token hash and queries daily rollups (plus raw events for recent days).
-3. The app renders totals and a time series.
+## Before public launch
 
-## Reading order
+Resolve these deployment inputs during implementation (they do not block local scaffolding):
 
-1. [Backend architecture](backend/architecture.md)
-2. [API contract](backend/api.md)
-3. [Data model](backend/data-model.md)
-4. [Short-link strategy](backend/short-links.md)
-5. [Caching and scaling](backend/caching-and-scale.md)
-6. [Analytics pipeline](backend/analytics.md)
-7. [Security and abuse](backend/security.md)
-8. [Observability and SLOs](backend/observability.md)
-9. [Backend deployment](backend/deployment.md)
-10. [Frontend architecture](frontend/architecture.md)
-11. [Frontend data fetching](frontend/data-fetching.md)
-12. [UI and accessibility](frontend/ui-and-a11y.md)
-13. [Frontend performance](frontend/performance.md)
-14. [Frontend deployment](frontend/deployment.md)
-15. [Architecture decision records](adr/)
+- Vercel plan/scheduler supports minute-level analytics jobs; Hobby daily cron does not meet the target.
+- Chosen region, domains, exact preview-origin pairing and verified nested Python entrypoint.
+- Upstash stream/claim/script support, eviction policy, byte/command limits and credential scope.
+- Expected sustained/burst traffic and monthly cost ceiling; explicit global create and per-code management-attempt budgets.
+- Acceptable 60-second redirect staleness and an available urgent takedown control on all hosts.
+- Data-retention/privacy obligations, abuse contact, erasure procedure, backup retention, measured recovery targets.
 
-## Environments
+Suggested goals (not benchmarks): warm redirect p95 <100 ms, create p95 <400 ms, captured-event p95 freshness <2 minutes, redirect availability 99.9%. See [observability](backend/observability.md) for eligibility, cold-start reporting and request-based error budgets.
 
-| Environment | Web app | API | Data |
-| --- | --- | --- | --- |
-| Local | `http://localhost:5173` | `http://127.0.0.1:8000` | Docker Postgres + Redis, or Neon/Upstash dev databases |
-| Preview | Vercel Preview URL | Vercel Preview URL | Neon branch + Upstash preview namespace |
-| Production | `https://app.short.example` | `https://api.short.example` | Neon production + Upstash production databases |
+## Reading map
 
-Short links use a separate public origin: `https://short.example`. It points at the same FastAPI function as the API origin. Keeping the API and redirect hosts separate makes CORS, caching, and future WAF rules easier to reason about.
+**Backend:** [architecture](backend/architecture.md), [API](backend/api.md), [data model](backend/data-model.md), [codes/validation](backend/short-links.md), [cache/capacity](backend/caching-and-scale.md), [analytics](backend/analytics.md), [security](backend/security.md), [observability](backend/observability.md), [deployment](backend/deployment.md).
 
-## Design principles
+**Frontend:** [architecture](frontend/architecture.md), [data fetching](frontend/data-fetching.md), [UI/accessibility](frontend/ui-and-a11y.md), [performance](frontend/performance.md), [deployment](frontend/deployment.md).
 
-**Backend**
+**Decisions:** [two projects](adr/0001-two-vercel-projects.md), [data stack](adr/0002-data-stack.md), [code strategy](adr/0003-short-code-strategy.md), [analytics](adr/0004-async-analytics.md), [anonymous tokens](adr/0005-anonymous-management-tokens.md).
 
-- Stateless request handling; no reliance on in-memory state across invocations.
-- Clear layers: transport → service → repository → infrastructure.
-- Correctness at the database boundary: unique constraints, foreign keys, transactions.
-- Read path optimized for cache hits and low tail latency.
-- Writes are idempotent where retries are possible.
-- Dependencies fail soft for redirects and fail loudly for writes.
-- Every request is traceable without logging secrets or raw IPs.
-
-**Frontend**
-
-- Server state is cached and deduplicated, never copied into a global store.
-- API types are generated from the OpenAPI schema; no hand-written duplicates.
-- Every screen has loading, empty, error, and success states.
-- Route-level code splitting and a strict performance budget.
-- Accessibility is part of the definition of done.
-- Environment-specific API URLs; no secrets in the bundle.
-
-## Implementation status
-
-The current repository contains the scaffolds only:
-
-- Backend: app factory, typed settings, CORS, `/health`, tests, lint, and Vercel entrypoint.
-- Frontend: default Vite React/TypeScript app with Bun lockfile.
-
-Everything else in this directory is the target design. Implementation milestones are tracked outside these docs.
-
-## Document conventions
-
-- `MUST`, `SHOULD`, and `MAY` follow RFC 2119 semantics.
-- All timestamps are UTC ISO 8601; database columns use `timestamptz`.
-- Examples use placeholder domains (`short.example`, `app.short.example`, `api.short.example`).
-- "V1" means the first production release described here.
+API owns HTTP semantics, data model owns schema/transaction invariants, cache document owns staleness, and deployment owns vendor requirements. Keep ADRs and examples consistent with these authorities; diagrams do not override contracts.
