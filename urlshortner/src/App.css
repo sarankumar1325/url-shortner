@@ -751,7 +751,8 @@ label {
   background: var(--positive-bg);
   color: var(--positive);
 }
-.status-expired {
+.status-expired,
+.status-used-up {
   background: var(--warning-bg);
   color: var(--warning);
 }
@@ -874,6 +875,20 @@ label {
 }
 .result-panel > .primary-button {
   margin-top: 15px;
+}
+.limits-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 160px) minmax(0, 1fr);
+  gap: 12px;
+  margin-top: 10px;
+}
+.limits-editor input {
+  width: 100%;
+}
+@media (max-width: 640px) {
+  .limits-editor {
+    grid-template-columns: 1fr;
+  }
 }
 .peek-hint {
   display: flex;

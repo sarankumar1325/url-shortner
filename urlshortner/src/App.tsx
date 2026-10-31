@@ -81,14 +81,19 @@ import {
   expiryInstant,
   fieldErrors,
   getLinkStatus,
+  limitFieldErrors,
   linksCsv,
   normalizeDestination,
   parseTags,
   previewUrl,
   qrFileName,
   recordFromMetadata,
+  statusClass,
   titleFor,
   validateDraft,
+  validateLimits,
+  visitsLabel,
+  type LimitErrors,
   type LinkRecord,
 } from './links'
 import { shortcutFor } from './shortcuts'
@@ -182,6 +187,9 @@ function CreateForm({
   const [campaignOpen, setCampaignOpen] = useState(false)
   const [campaignError, setCampaignError] = useState<string | null>(null)
   const [tagError, setTagError] = useState<string | null>(null)
+  const [fallback, setFallback] = useState('')
+  const [visitLimit, setVisitLimit] = useState('')
+  const [limitErrors, setLimitErrors] = useState<LimitErrors>({})
   const [options, setOptions] = useState(false)
   const [errors, setErrors] = useState<ReturnType<typeof validateDraft>>({})
   const [pasteMessage, setPasteMessage] = useState('')
@@ -231,6 +239,11 @@ function CreateForm({
         setOptions(true)
         setTagError(problemText(error.problem))
       }
+      const limitProblems = limitFieldErrors(error.problem.errors)
+      if (Object.keys(limitProblems).length > 0) {
+        setLimitErrors(limitProblems)
+        setOptions(true)
+      }
       if (Object.keys(fieldProblems).length > 0) {
         setErrors((current) => ({ ...current, ...fieldProblems }))
         if (fieldProblems.alias || fieldProblems.expiresAt) setOptions(true)
@@ -256,16 +269,29 @@ function CreateForm({
     if (!problems.destination && !tracked.error) {
       problems.destination = validateDraft(tracked.url, '', '', []).destination
     }
+    const limits = validateLimits(fallback, visitLimit)
+    const limitProblem = Object.values(limits.errors).some(Boolean)
     setErrors(problems)
     setTagError(parsedTags.error)
     setCampaignError(tracked.error)
-    if (Object.values(problems).some(Boolean) || parsedTags.error || tracked.error) {
-      if (problems.alias || problems.expiresAt || parsedTags.error) setOptions(true)
+    setLimitErrors(limits.errors)
+    if (
+      Object.values(problems).some(Boolean) ||
+      parsedTags.error ||
+      tracked.error ||
+      limitProblem
+    ) {
+      if (problems.alias || problems.expiresAt || parsedTags.error || limitProblem)
+        setOptions(true)
       if (tracked.error) setCampaignOpen(true)
       window.requestAnimationFrame(() => {
         if (problems.destination) urlInput.current?.focus()
         else if (parsedTags.error) document.getElementById('tags')?.focus()
         else if (tracked.error) document.getElementById('campaign-source')?.focus()
+        else if (!problems.alias && !problems.expiresAt && limitProblem)
+          document
+            .getElementById(limits.errors.fallbackUrl ? 'fallback-url' : 'visit-limit')
+            ?.focus()
         else
           document
             .getElementById(problems.alias ? 'custom-alias' : 'expires-at')
@@ -278,6 +304,8 @@ function CreateForm({
       custom_alias: alias || null,
       expires_at: expiry ? expiryInstant(expiry) : null,
       tags: parsedTags.tags,
+      fallback_url: limits.fallbackUrl,
+      max_clicks: limits.maxClicks,
     }
     void send({ key: crypto.randomUUID(), body })
   }
@@ -320,6 +348,9 @@ function CreateForm({
               setAlias('')
               setExpiry('')
               setTagInput('')
+              setFallback('')
+              setVisitLimit('')
+              setLimitErrors({})
               setCampaign({ source: '', medium: '', campaign: '' })
               setCampaignError(null)
               setCampaignOpen(false)
@@ -529,6 +560,61 @@ function CreateForm({
                 {errors.expiresAt || 'Expires at the end of the selected UTC day. Leave empty for no expiry.'}
               </p>
             </div>
+            <div>
+              <label htmlFor="visit-limit">
+                Visit limit <span className="meta">(optional)</span>
+              </label>
+              <input
+                id="visit-limit"
+                inputMode="numeric"
+                value={visitLimit}
+                onChange={(event) => {
+                  setVisitLimit(event.target.value)
+                  edit()
+                  if (limitErrors.maxClicks)
+                    setLimitErrors({ ...limitErrors, maxClicks: undefined })
+                }}
+                placeholder="No limit"
+                aria-invalid={Boolean(limitErrors.maxClicks)}
+                aria-describedby="visit-limit-hint"
+              />
+              <p
+                id="visit-limit-hint"
+                className={limitErrors.maxClicks ? 'field-error' : 'field-hint'}
+              >
+                {limitErrors.maxClicks ||
+                  'Stops after this many visits. Link previews in chat apps do not count.'}
+              </p>
+            </div>
+            <div>
+              <label htmlFor="fallback-url">
+                Fallback URL <span className="meta">(optional)</span>
+              </label>
+              <input
+                id="fallback-url"
+                type="url"
+                inputMode="url"
+                autoCapitalize="none"
+                spellCheck={false}
+                value={fallback}
+                onChange={(event) => {
+                  setFallback(event.target.value)
+                  edit()
+                  if (limitErrors.fallbackUrl)
+                    setLimitErrors({ ...limitErrors, fallbackUrl: undefined })
+                }}
+                placeholder="https://example.com/offer-ended"
+                aria-invalid={Boolean(limitErrors.fallbackUrl)}
+                aria-describedby="fallback-url-hint"
+              />
+              <p
+                id="fallback-url-hint"
+                className={limitErrors.fallbackUrl ? 'field-error' : 'field-hint'}
+              >
+                {limitErrors.fallbackUrl ||
+                  'Where visitors go after the link expires or runs out of visits.'}
+              </p>
+            </div>
             <div className="tag-field">
               <label htmlFor="tags">
                 Tags <span className="meta">(up to 5)</span>
@@ -659,6 +745,10 @@ function DetailPage({
   const [busyQr, setBusyQr] = useState(false)
   const [tagInput, setTagInput] = useState('')
   const [tagError, setTagError] = useState<string | null>(null)
+  const [fallbackInput, setFallbackInput] = useState('')
+  const [limitInput, setLimitInput] = useState('')
+  const [limitErrors, setLimitErrors] = useState<LimitErrors>({})
+  const [busyLimits, setBusyLimits] = useState(false)
   const [actionError, setActionError] = useState('')
 
   useEffect(() => {
@@ -678,6 +768,8 @@ function DetailPage({
         let record = recordFromMetadata(metadata)
         setLink(record)
         setTagInput(record.tags.join(', '))
+        setFallbackInput(record.fallbackUrl ?? '')
+        setLimitInput(record.maxClicks?.toString() ?? '')
         onLoaded(record)
         setLoading(false)
         try {
@@ -769,6 +861,35 @@ function DetailPage({
     }
   }
 
+  async function saveLimits() {
+    if (!link) return
+    const parsed = validateLimits(fallbackInput, limitInput)
+    setLimitErrors(parsed.errors)
+    if (Object.values(parsed.errors).some(Boolean)) return
+    setBusyLimits(true)
+    setActionError('')
+    try {
+      const metadata = await updateLinkRequest(
+        link.code,
+        { fallback_url: parsed.fallbackUrl, max_clicks: parsed.maxClicks },
+        { workspaceId },
+        new AbortController().signal,
+      )
+      const next = applyMetadata(link, metadata)
+      setLink(next)
+      setFallbackInput(next.fallbackUrl ?? '')
+      setLimitInput(next.maxClicks?.toString() ?? '')
+      onLoaded(next)
+      notify('Visit limit and fallback saved.')
+    } catch (failure) {
+      const mapped = isProblem(failure) ? limitFieldErrors(failure.problem.errors) : {}
+      if (Object.keys(mapped).length > 0) setLimitErrors(mapped)
+      else setActionError(describeError(failure))
+    } finally {
+      setBusyLimits(false)
+    }
+  }
+
   async function downloadQr() {
     if (!link?.shortUrl) return
     setBusyQr(true)
@@ -857,7 +978,7 @@ function DetailPage({
         </Link>
         <div className="section-heading">
           <h1 tabIndex={-1}>{titleFor(link.destination) || link.code}</h1>
-          <span className={`status status-${status.toLowerCase()}`}>
+          <span className={`status ${statusClass(status)}`}>
             <span className="status-dot" />
             {status}
           </span>
@@ -1008,8 +1129,8 @@ function DetailPage({
           <div>
             <h3>Link availability</h3>
             <p>
-              {status === 'Expired'
-                ? 'This link has passed its expiration date.'
+              {status === 'Expired' || status === 'Used up'
+                ? `${status === 'Expired' ? 'This link has passed its expiration date.' : 'This link has used all of its visits.'} ${link.fallbackUrl ? 'Visitors go to the fallback URL.' : 'Visitors see a page explaining that.'}`
                 : link.active
                   ? 'Visitors are redirected to the destination.'
                   : 'Visitors see an unavailable response.'}
@@ -1037,6 +1158,74 @@ function DetailPage({
             </p>
           </div>
           <span className="meta">UTC</span>
+        </div>
+        <div className="setting-row limits-row">
+          <div>
+            <h3>Visit limit and fallback</h3>
+            <p>{visitsLabel(link)}</p>
+            <div className="limits-editor">
+              <div>
+                <label htmlFor="detail-visit-limit">Visit limit</label>
+                <input
+                  id="detail-visit-limit"
+                  inputMode="numeric"
+                  value={limitInput}
+                  onChange={(event) => {
+                    setLimitInput(event.target.value)
+                    if (limitErrors.maxClicks)
+                      setLimitErrors({ ...limitErrors, maxClicks: undefined })
+                  }}
+                  placeholder="No limit"
+                  disabled={!canEdit || busyLimits}
+                  aria-invalid={Boolean(limitErrors.maxClicks)}
+                  aria-describedby="detail-visit-limit-hint"
+                />
+                <p
+                  id="detail-visit-limit-hint"
+                  className={limitErrors.maxClicks ? 'field-error' : 'field-hint'}
+                >
+                  {limitErrors.maxClicks ||
+                    'Raise it to allow more visits. Clearing it resets the count.'}
+                </p>
+              </div>
+              <div>
+                <label htmlFor="detail-fallback-url">Fallback URL</label>
+                <input
+                  id="detail-fallback-url"
+                  type="url"
+                  inputMode="url"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  value={fallbackInput}
+                  onChange={(event) => {
+                    setFallbackInput(event.target.value)
+                    if (limitErrors.fallbackUrl)
+                      setLimitErrors({ ...limitErrors, fallbackUrl: undefined })
+                  }}
+                  placeholder="https://example.com/offer-ended"
+                  disabled={!canEdit || busyLimits}
+                  aria-invalid={Boolean(limitErrors.fallbackUrl)}
+                  aria-describedby="detail-fallback-url-hint"
+                />
+                <p
+                  id="detail-fallback-url-hint"
+                  className={limitErrors.fallbackUrl ? 'field-error' : 'field-hint'}
+                >
+                  {limitErrors.fallbackUrl ||
+                    'Used after expiry or when the visit limit is reached.'}
+                </p>
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => void saveLimits()}
+            disabled={!canEdit || busyLimits}
+          >
+            {busyLimits ? <LoaderCircle size={14} className="spin" /> : null}
+            Save
+          </button>
         </div>
         <div className="setting-row">
           <div>

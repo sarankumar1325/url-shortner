@@ -35,6 +35,9 @@ export type LinkRecord = {
   active: boolean
   tags: string[]
   clicks30d: number | null
+  fallbackUrl: string | null
+  maxClicks: number | null
+  clicksUsed: number
   analytics: Analytics | null
   analyticsLoading: boolean
   analyticsError: string | null
@@ -109,6 +112,9 @@ export function recordFromMetadata(
     active: metadata.is_active,
     tags: metadata.tags ?? [],
     clicks30d: metadata.clicks_30d ?? null,
+    fallbackUrl: metadata.fallback_url ?? null,
+    maxClicks: metadata.max_clicks ?? null,
+    clicksUsed: metadata.clicks_used ?? 0,
     analytics,
     analyticsLoading: false,
     analyticsError: null,
@@ -132,22 +138,89 @@ export function applyMetadata(
     active: metadata.is_active,
     tags: metadata.tags ?? link.tags,
     clicks30d: metadata.clicks_30d ?? link.clicks30d,
+    fallbackUrl:
+      metadata.fallback_url === undefined ? link.fallbackUrl : metadata.fallback_url,
+    maxClicks: metadata.max_clicks === undefined ? link.maxClicks : metadata.max_clicks,
+    clicksUsed: metadata.clicks_used ?? link.clicksUsed,
     loading: false,
     error: null,
   }
 }
 
+export type LinkStatus = 'Active' | 'Expired' | 'Used up' | 'Paused'
+
+export function isUsedUp(
+  link: Partial<Pick<LinkRecord, 'maxClicks' | 'clicksUsed'>>,
+): boolean {
+  return link.maxClicks != null && (link.clicksUsed ?? 0) >= link.maxClicks
+}
+
 export function getLinkStatus(
-  link: Pick<LinkRecord, 'expiresAt' | 'active'>,
+  link: Pick<LinkRecord, 'expiresAt' | 'active'> &
+    Partial<Pick<LinkRecord, 'maxClicks' | 'clicksUsed'>>,
   now = new Date(),
-): 'Active' | 'Expired' | 'Paused' {
+): LinkStatus {
   if (
     link.expiresAt !== null &&
     new Date(link.expiresAt).getTime() <= now.getTime()
   ) {
     return 'Expired'
   }
+  if (isUsedUp(link)) return 'Used up'
   return link.active ? 'Active' : 'Paused'
+}
+
+export function statusClass(status: LinkStatus | 'Loading'): string {
+  return `status-${status.toLowerCase().replace(/\s+/g, '-')}`
+}
+
+export const MAX_VISIT_LIMIT = 1_000_000
+
+/** Parse an optional visit limit; empty means no limit. */
+export function parseVisitLimit(raw: string): { value: number | null; error: string | null } {
+  const text = raw.trim().replace(/[,_\s]/g, '')
+  if (!text) return { value: null, error: null }
+  if (!/^\d+$/.test(text)) return { value: null, error: 'Use a whole number of visits.' }
+  const value = Number(text)
+  if (value < 1 || value > MAX_VISIT_LIMIT) {
+    return { value: null, error: `Choose between 1 and ${number.format(MAX_VISIT_LIMIT)} visits.` }
+  }
+  return { value, error: null }
+}
+
+export type LimitErrors = { fallbackUrl?: string; maxClicks?: string }
+
+export function validateLimits(fallback: string, visitLimit: string): {
+  errors: LimitErrors
+  fallbackUrl: string | null
+  maxClicks: number | null
+} {
+  const errors: LimitErrors = {}
+  const normalized = normalizeDestination(fallback)
+  if (normalized) {
+    const problem = validateDraft(normalized, '', '', []).destination
+    if (problem) errors.fallbackUrl = problem
+  }
+  const limit = parseVisitLimit(visitLimit)
+  if (limit.error) errors.maxClicks = limit.error
+  return { errors, fallbackUrl: normalized || null, maxClicks: limit.value }
+}
+
+export function limitFieldErrors(
+  errors: readonly { field: string; message: string }[],
+): LimitErrors {
+  const mapped: LimitErrors = {}
+  for (const issue of errors) {
+    if (issue.field === 'fallback_url') mapped.fallbackUrl = issue.message
+    if (issue.field === 'max_clicks') mapped.maxClicks = issue.message
+  }
+  return mapped
+}
+
+export function visitsLabel(link: Pick<LinkRecord, 'maxClicks' | 'clicksUsed'>): string {
+  if (link.maxClicks == null) return 'No visit limit.'
+  const left = Math.max(0, link.maxClicks - link.clicksUsed)
+  return `${number.format(link.clicksUsed)} of ${number.format(link.maxClicks)} visit${link.maxClicks === 1 ? '' : 's'} used · ${number.format(left)} left`
 }
 
 export type LinkSort = 'newest' | 'oldest' | 'clicks' | 'expiry'
@@ -404,6 +477,9 @@ export function linksCsv(links: LinkRecord[]): string {
       'created_at',
       'expires_at',
       'clicks_30d',
+      'fallback_url',
+      'max_clicks',
+      'clicks_used',
     ],
     ...links.map((link) => [
       link.code,
@@ -414,6 +490,9 @@ export function linksCsv(links: LinkRecord[]): string {
       link.createdAt,
       link.expiresAt,
       link.clicks30d,
+      link.fallbackUrl,
+      link.maxClicks,
+      link.maxClicks == null ? null : link.clicksUsed,
     ]),
   ]
   return rows.map((row) => row.map(csvField).join(',')).join('\r\n') + '\r\n'

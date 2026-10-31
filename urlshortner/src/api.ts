@@ -92,6 +92,9 @@ export type LinkMetadata = {
   updated_at: string
   tags: string[]
   clicks_30d?: number
+  fallback_url?: string | null
+  max_clicks?: number | null
+  clicks_used?: number
 }
 
 export type CreatedLink = LinkMetadata & { management_token?: string }
@@ -143,6 +146,8 @@ export type CreateBody = {
   custom_alias?: string | null
   expires_at?: string | null
   tags?: string[] | null
+  fallback_url?: string | null
+  max_clicks?: number | null
 }
 
 export type AbuseReason =
@@ -514,9 +519,12 @@ export function createLink(
   workspaceId: string,
   signal: AbortSignal,
 ): Promise<CreatedLink> {
-  // Older API deployments reject an unknown tags field, even when it is empty.
-  const { tags, ...otherFields } = body
-  const payload = tags?.length ? { ...otherFields, tags } : otherFields
+  // Older API deployments reject unknown fields, even when they are empty.
+  const { tags, fallback_url, max_clicks, ...otherFields } = body
+  const payload: Record<string, unknown> = { ...otherFields }
+  if (tags?.length) payload.tags = tags
+  if (fallback_url) payload.fallback_url = fallback_url
+  if (max_clicks != null) payload.max_clicks = max_clicks
   return request<CreatedLink>('/api/v1/links', {
     method: 'POST',
     body: payload,
@@ -544,6 +552,8 @@ export function updateLink(
     expires_at?: string | null
     is_active?: boolean
     tags?: string[] | null
+    fallback_url?: string | null
+    max_clicks?: number | null
   },
   access: Access,
   signal: AbortSignal,

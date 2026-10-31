@@ -17,12 +17,13 @@ import {
   linkClicks,
   number,
   sortLinks,
+  statusClass,
   titleFor,
   type LinkRecord,
   type LinkSort,
 } from './links'
 
-const FILTERS = ['All links', 'Active', 'Paused', 'Expired'] as const
+const FILTERS = ['All links', 'Active', 'Paused', 'Expired', 'Used up'] as const
 
 export default function LinkList({
   links,
@@ -209,7 +210,7 @@ export default function LinkList({
                     Loading
                   </span>
                 ) : (
-                  <span className={`status status-${status.toLowerCase()}`}>
+                  <span className={`status ${statusClass(status)}`}>
                     <span className="status-dot" />
                     {status}
                   </span>
