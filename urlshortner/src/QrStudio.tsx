@@ -2,6 +2,7 @@ import { useMemo, useState, type CSSProperties, type ChangeEvent } from 'react'
 import {
   AlertTriangle,
   ArrowLeftRight,
+  ClipboardPaste,
   Check,
   ClipboardCopy,
   Code2,
@@ -14,6 +15,7 @@ import {
   RotateCcw,
   ShieldCheck,
   Type,
+  X,
 } from 'lucide-react'
 import { Link, useSearchParams } from 'react-router-dom'
 import type { QRCodeErrorCorrectionLevel } from 'qrcode'
@@ -29,8 +31,11 @@ import {
   effectiveErrorCorrection,
   formatInfo,
   isArtistic,
+  pastedContent,
+  qrGeometry,
   qrSvg,
   qrText,
+  qrVersion,
   scanWarnings,
   zipFileName,
   zipFiles,
@@ -57,6 +62,9 @@ const PRESETS: { name: string; foreground: string; background: string }[] = [
 const MAX_LOGO_BYTES = 512 * 1024
 
 type CenterMode = 'none' | 'text' | 'logo'
+type Source = 'workspace' | 'paste'
+// Style thumbnails need something to encode before anything is pasted.
+const TILE_SAMPLE = 'Shortly'
 
 function svgDataUrl(svg: string) {
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`
@@ -134,11 +142,20 @@ function ColorField({
 
 function useQrPreviews(encoded: string, design: QrDesign, links: LinkRecord[]) {
   const previewSvg = useMemo(() => (encoded ? qrSvg(encoded, design, 320) : ''), [encoded, design])
+  const count = useMemo(() => (encoded ? qrGeometry(encoded, design).count : 0), [encoded, design])
   const tiles = useMemo(() => {
-    if (!encoded) return new Map<string, string>()
+    const sample = encoded || TILE_SAMPLE
     const base = { ...design, center: { kind: 'none' as const }, margin: 1 }
     return new Map(
-      MODULE_STYLES.map((style) => [style.value, svgDataUrl(qrSvg(encoded, { ...base, moduleStyle: style.value }, 72))]),
+      MODULE_STYLES.map((style) => [style.value, svgDataUrl(qrSvg(sample, { ...base, moduleStyle: style.value }, 72))]),
+    )
+  }, [encoded, design])
+  const tooDense = useMemo(() => {
+    if (!encoded) return new Set<string>()
+    return new Set(
+      MODULE_STYLES.filter(
+        (style) => qrVersion(qrGeometry(encoded, { ...design, moduleStyle: style.value }).count) > style.maxVersion,
+      ).map((style) => style.value),
     )
   }, [encoded, design])
   const thumbs = useMemo(() => {
@@ -147,7 +164,7 @@ function useQrPreviews(encoded: string, design: QrDesign, links: LinkRecord[]) {
       links.filter((item) => item.shortUrl).map((item) => [item.code, svgDataUrl(qrSvg(item.shortUrl, base, 44))]),
     )
   }, [links, design])
-  return { previewSvg, tiles, thumbs }
+  return { previewSvg, count, tiles, tooDense, thumbs }
 }
 
 export default function QrStudio({
@@ -176,12 +193,28 @@ export default function QrStudio({
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [bulkFormat, setBulkFormat] = useState<QrFormat>('png')
   const [progress, setProgress] = useState(0)
+  const [source, setSource] = useState<Source>('workspace')
+  const [pasteValue, setPasteValue] = useState('')
 
   const active = links.filter((link) => link.shortUrl)
   const link = active.find((item) => item.code === requested) ?? active[0]
-  const encoded = link ? (safeScan ? previewUrl(link.shortUrl) : link.shortUrl) : ''
-  const warnings = scanWarnings(design)
-  const { previewSvg, tiles, thumbs } = useQrPreviews(encoded, design, links)
+  const pasteMode = source === 'paste' || !link
+  const pasted = pastedContent(pasteValue)
+  const target = pasteMode
+    ? pasted.text
+      ? { text: pasted.text, name: pasted.name, caption: pasted.caption, isLink: pasted.kind === 'url' }
+      : null
+    : {
+        text: safeScan ? previewUrl(link.shortUrl) : link.shortUrl,
+        name: link.code,
+        caption: displayShortUrl(link.shortUrl),
+        isLink: true,
+      }
+  const encoded = target?.text ?? ''
+  const { previewSvg, count, tiles, tooDense, thumbs } = useQrPreviews(encoded, design, links)
+  const warnings = scanWarnings(design, count)
+  const version = count ? qrVersion(count) : 0
+  const canPaste = typeof navigator !== 'undefined' && Boolean(navigator.clipboard?.readText)
   const usesText = design.center.kind === 'text' || design.moduleStyle === 'ascii'
 
   function update(patch: Partial<QrDesign>) {
@@ -233,11 +266,30 @@ export default function QrStudio({
     return { pixels, pdf, code: item.code, caption: displayShortUrl(item.shortUrl) }
   }
 
+  async function pasteFromClipboard() {
+    try {
+      const text = await navigator.clipboard.readText()
+      if (!text.trim()) {
+        notify('The clipboard has no text to paste.')
+        return
+      }
+      setSource('paste')
+      setPasteValue(text.trim())
+    } catch {
+      notify('Clipboard access was blocked. Paste into the box with ⌘V or Ctrl+V.')
+    }
+  }
+
   async function download() {
-    if (!link || !encoded) return
+    if (!target) return
     setBusy('download')
     try {
-      const { name, blob } = await exportQr(format, encoded, design, exportOptions(link))
+      const { name, blob } = await exportQr(format, target.text, design, {
+        pixels,
+        pdf,
+        code: target.name,
+        caption: target.caption,
+      })
       saveBlob(name, blob)
       notify(`QR code downloaded as ${formatInfo(format).label}.`)
     } catch (failure) {
@@ -264,7 +316,9 @@ export default function QrStudio({
             ? 'SVG markup copied.'
             : kind === 'text'
               ? 'QR code copied as text.'
-              : 'Link copied.',
+              : target?.isLink
+                ? 'Link copied.'
+                : 'Text copied.',
       )
     } catch {
       notify('Clipboard access is unavailable here.')
@@ -317,8 +371,8 @@ export default function QrStudio({
         <span className="eyebrow">QR studio</span>
         <h1 tabIndex={-1}>Codes that look like yours.</h1>
         <p>
-          Style a QR code for any link in {workspaceName}, check that it will scan, then copy it
-          or export one or all of them in the format you need.
+          Style a QR code for any link in {workspaceName} or anything you paste, check that it
+          will scan, then copy it or export it in the format you need.
         </p>
       </div>
 
@@ -326,34 +380,86 @@ export default function QrStudio({
         <div className="loading-panel" role="status" aria-busy="true">
           Loading links…
         </div>
-      ) : !link ? (
-        <div className="panel empty-catalog">
-          <QrCode size={28} strokeWidth={1.4} />
-          <p>Create a link first, then come back to design its QR code.</p>
-          <Link className="primary-button" to="/">
-            Create a link
-          </Link>
-        </div>
       ) : (
         <>
           <div className="qr-studio">
             <section className="panel qr-controls" aria-label="QR code design">
               <div className="control-group">
-                <label htmlFor="qr-link">Link</label>
-                <select id="qr-link" value={link.code} onChange={(event) => chooseLink(event.target.value)}>
-                  {active.map((item) => (
-                    <option key={item.code} value={item.code}>
-                      {displayShortUrl(item.shortUrl)} → {titleFor(item.destination)}
-                    </option>
-                  ))}
-                </select>
-                <label className="check-row">
-                  <input type="checkbox" checked={safeScan} onChange={(event) => setSafeScan(event.target.checked)} />
-                  <span>
-                    <strong>Safe scan.</strong> Encode the Peek link so people see the destination
-                    before they visit.
-                  </span>
-                </label>
+                <span className="control-label">Content</span>
+                {link && (
+                  <Segmented<Source>
+                    label="QR code content"
+                    value={pasteMode ? 'paste' : 'workspace'}
+                    options={[
+                      { value: 'workspace', label: `Your links (${active.length})` },
+                      { value: 'paste', label: 'Paste a link' },
+                    ]}
+                    onChange={setSource}
+                  />
+                )}
+                {pasteMode ? (
+                  <div className="paste-box">
+                    <label htmlFor="qr-paste" className="sr-only">
+                      Link or text to encode
+                    </label>
+                    <textarea
+                      id="qr-paste"
+                      value={pasteValue}
+                      rows={3}
+                      spellCheck={false}
+                      placeholder="Paste any link or text, like https://example.com/menu"
+                      aria-invalid={pasted.error ? true : undefined}
+                      aria-describedby="qr-paste-help"
+                      onChange={(event) => setPasteValue(event.target.value)}
+                    />
+                    <div className="paste-actions">
+                      {canPaste && (
+                        <button type="button" className="secondary-button" onClick={() => void pasteFromClipboard()}>
+                          <ClipboardPaste size={15} /> Paste from clipboard
+                        </button>
+                      )}
+                      {pasteValue && (
+                        <button type="button" className="text-button" onClick={() => setPasteValue('')}>
+                          <X size={13} /> Clear
+                        </button>
+                      )}
+                    </div>
+                    <p id="qr-paste-help" className={pasted.error ? 'field-error' : 'meta'} role={pasted.error ? 'alert' : undefined}>
+                      {pasted.error ??
+                        (pasted.normalized
+                          ? `Encoded as ${pasted.text} so phones open it as a link.`
+                          : !link
+                            ? 'Encoded exactly as pasted. This workspace has no short links yet; links you create appear here too.'
+                            : 'Encoded exactly as pasted. Scans go straight to it, so they are not counted in your analytics.')}
+                    </p>
+                    {pasted.kind === 'url' && version > 6 && (
+                      <p className="meta">
+                        Long links make dense codes that are harder to scan from a distance.{' '}
+                        <Link to="/">Shorten it</Link> for a simpler code that also counts scans.
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <>
+                    <label htmlFor="qr-link" className="sr-only">
+                      Link
+                    </label>
+                    <select id="qr-link" value={link.code} onChange={(event) => chooseLink(event.target.value)}>
+                      {active.map((item) => (
+                        <option key={item.code} value={item.code}>
+                          {displayShortUrl(item.shortUrl)} → {titleFor(item.destination)}
+                        </option>
+                      ))}
+                    </select>
+                    <label className="check-row">
+                      <input type="checkbox" checked={safeScan} onChange={(event) => setSafeScan(event.target.checked)} />
+                      <span>
+                        <strong>Safe scan.</strong> Encode the Peek link so people see the destination
+                        before they visit.
+                      </span>
+                    </label>
+                  </>
+                )}
               </div>
 
               <div className="control-group">
@@ -366,11 +472,16 @@ export default function QrStudio({
                       role="radio"
                       aria-checked={design.moduleStyle === style.value}
                       className={`style-tile ${design.moduleStyle === style.value ? 'active' : ''}`}
+                      title={tooDense.has(style.value) ? 'Too dense to scan reliably in this style' : undefined}
                       onClick={() => update({ moduleStyle: style.value })}
                     >
                       <img src={tiles.get(style.value)} alt="" width={72} height={72} />
                       <span>{style.label}</span>
-                      {style.artistic && <span className="tile-badge">Art</span>}
+                      {tooDense.has(style.value) ? (
+                        <span className="tile-badge tile-badge-bad">Too dense</span>
+                      ) : (
+                        style.artistic && <span className="tile-badge">Art</span>
+                      )}
                     </button>
                   ))}
                 </div>
@@ -546,17 +657,29 @@ export default function QrStudio({
             </section>
 
             <section className="panel qr-preview" aria-label="Preview and export">
-              <div
-                className="qr-canvas"
-                role="img"
-                aria-label={`QR code preview for ${displayShortUrl(encoded)}`}
-                // Inline so the preview can use the page's web fonts; the markup is generated and escaped by qrSvg.
-                dangerouslySetInnerHTML={{ __html: previewSvg }}
-              />
-              <p className="qr-encoded">
-                <span className="meta">Encodes</span>
-                <code>{displayShortUrl(encoded)}</code>
-              </p>
+              {previewSvg ? (
+                <div
+                  className="qr-canvas"
+                  role="img"
+                  aria-label={`QR code preview for ${target?.caption ?? ''}`}
+                  // Inline so the preview can use the page's web fonts; the markup is generated and escaped by qrSvg.
+                  dangerouslySetInnerHTML={{ __html: previewSvg }}
+                />
+              ) : (
+                <div className="qr-canvas qr-canvas-empty">
+                  <QrCode size={34} strokeWidth={1.3} aria-hidden="true" />
+                  <p>Paste a link or some text to see its QR code.</p>
+                </div>
+              )}
+              {target && (
+                <p className="qr-encoded">
+                  <span className="meta">Encodes</span>
+                  <code title={target.text}>{pasteMode ? target.text : displayShortUrl(target.text)}</code>
+                  <span className="meta numeric">
+                    v{version} · {count}×{count}
+                  </span>
+                </p>
+              )}
               {warnings.length === 0 ? (
                 <p className="scan-status good">
                   <ShieldCheck size={15} /> Good contrast and quiet zone. This should scan reliably.
@@ -624,78 +747,80 @@ export default function QrStudio({
                         : `${pixels} × ${pixels} px${format === 'jpeg' ? ', no transparency' : ''}.`}
                   </p>
                 )}
-                <button type="button" className="primary-button export-button" disabled={busy !== null} onClick={() => void download()}>
+                <button type="button" className="primary-button export-button" disabled={busy !== null || !target} onClick={() => void download()}>
                   {busy === 'download' ? <LoaderCircle size={15} className="spin" /> : <Download size={15} />}
                   Download {info.label}
                 </button>
                 <div className="copy-row">
                   {canCopyImages() && (
-                    <button type="button" className="secondary-button" disabled={busy !== null} onClick={() => void copy('image')}>
+                    <button type="button" className="secondary-button" disabled={busy !== null || !target} onClick={() => void copy('image')}>
                       {busy === 'copy-image' ? <LoaderCircle size={15} className="spin" /> : <ClipboardCopy size={15} />}
                       Copy image
                     </button>
                   )}
-                  <button type="button" className="secondary-button" disabled={busy !== null} onClick={() => void copy('svg')}>
+                  <button type="button" className="secondary-button" disabled={busy !== null || !target} onClick={() => void copy('svg')}>
                     <Code2 size={15} /> Copy SVG
                   </button>
-                  <button type="button" className="secondary-button" disabled={busy !== null} onClick={() => void copy('text')}>
+                  <button type="button" className="secondary-button" disabled={busy !== null || !target} onClick={() => void copy('text')}>
                     <Type size={15} /> Copy as text
                   </button>
-                  <button type="button" className="secondary-button" disabled={busy !== null} onClick={() => void copy('link')}>
-                    <Copy size={15} /> Copy link
+                  <button type="button" className="secondary-button" disabled={busy !== null || !target} onClick={() => void copy('link')}>
+                    <Copy size={15} /> {target && !target.isLink ? 'Copy text' : 'Copy link'}
                   </button>
                 </div>
               </div>
             </section>
           </div>
 
-          <section className="panel bulk-panel" aria-labelledby="bulk-heading">
-            <div className="section-heading">
-              <div>
-                <h2 id="bulk-heading">Bulk export</h2>
-                <p className="meta">Every selected link gets this design, zipped into one download.</p>
-              </div>
-              <div className="bulk-actions">
-                <label className="sr-only" htmlFor="bulk-format">
-                  Bulk format
-                </label>
-                <select id="bulk-format" value={bulkFormat} onChange={(event) => setBulkFormat(event.target.value as QrFormat)}>
-                  {FORMATS.map((item) => (
-                    <option key={item.value} value={item.value}>
-                      {item.label}
-                    </option>
-                  ))}
-                </select>
-                <button type="button" className="primary-button" disabled={selected.size === 0 || busy !== null} onClick={() => void downloadZip()}>
-                  {busy === 'zip' ? <LoaderCircle size={15} className="spin" /> : <FileArchive size={15} />}
-                  {busy === 'zip' ? `Zipping ${Math.round(progress * 100)}%` : `Download ZIP (${selected.size})`}
-                </button>
-              </div>
-            </div>
-            <label className="check-row select-all">
-              <input
-                type="checkbox"
-                checked={allSelected}
-                onChange={() => setSelected(allSelected ? new Set() : new Set(active.map((item) => item.code)))}
-              />
-              <span>Select all {active.length} links</span>
-            </label>
-            <ul className="bulk-list">
-              {active.map((item) => (
-                <li key={item.code}>
-                  <label className="check-row">
-                    <input type="checkbox" checked={selected.has(item.code)} onChange={() => toggle(item.code)} />
-                    <img className="bulk-thumb" src={thumbs.get(item.code)} alt="" width={44} height={44} />
-                    <span className="bulk-link">
-                      <strong>{displayShortUrl(item.shortUrl)}</strong>
-                      <span>{titleFor(item.destination)}</span>
-                    </span>
-                    {selected.has(item.code) && <Check size={14} className="bulk-check" aria-hidden="true" />}
+          {active.length > 0 && (
+            <section className="panel bulk-panel" aria-labelledby="bulk-heading">
+              <div className="section-heading">
+                <div>
+                  <h2 id="bulk-heading">Bulk export</h2>
+                  <p className="meta">Every selected link gets this design, zipped into one download.</p>
+                </div>
+                <div className="bulk-actions">
+                  <label className="sr-only" htmlFor="bulk-format">
+                    Bulk format
                   </label>
-                </li>
-              ))}
-            </ul>
-          </section>
+                  <select id="bulk-format" value={bulkFormat} onChange={(event) => setBulkFormat(event.target.value as QrFormat)}>
+                    {FORMATS.map((item) => (
+                      <option key={item.value} value={item.value}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                  <button type="button" className="primary-button" disabled={selected.size === 0 || busy !== null} onClick={() => void downloadZip()}>
+                    {busy === 'zip' ? <LoaderCircle size={15} className="spin" /> : <FileArchive size={15} />}
+                    {busy === 'zip' ? `Zipping ${Math.round(progress * 100)}%` : `Download ZIP (${selected.size})`}
+                  </button>
+                </div>
+              </div>
+              <label className="check-row select-all">
+                <input
+                  type="checkbox"
+                  checked={allSelected}
+                  onChange={() => setSelected(allSelected ? new Set() : new Set(active.map((item) => item.code)))}
+                />
+                <span>Select all {active.length} links</span>
+              </label>
+              <ul className="bulk-list">
+                {active.map((item) => (
+                  <li key={item.code}>
+                    <label className="check-row">
+                      <input type="checkbox" checked={selected.has(item.code)} onChange={() => toggle(item.code)} />
+                      <img className="bulk-thumb" src={thumbs.get(item.code)} alt="" width={44} height={44} />
+                      <span className="bulk-link">
+                        <strong>{displayShortUrl(item.shortUrl)}</strong>
+                        <span>{titleFor(item.destination)}</span>
+                      </span>
+                      {selected.has(item.code) && <Check size={14} className="bulk-check" aria-hidden="true" />}
+                    </label>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
         </>
       )}
     </div>

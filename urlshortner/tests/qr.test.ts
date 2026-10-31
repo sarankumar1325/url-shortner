@@ -3,6 +3,7 @@ import {
   DEFAULT_DESIGN,
   FONTS,
   FORMATS,
+  MAX_PASTE_BYTES,
   MODULE_STYLES,
   asciiCharacters,
   centerFontSize,
@@ -11,10 +12,13 @@ import {
   effectiveErrorCorrection,
   fontFor,
   isFinder,
+  minPrintCm,
+  pastedContent,
   qrExportName,
   qrGeometry,
   qrSvg,
   qrText,
+  qrVersion,
   scanWarnings,
   zipFiles,
 } from '../src/qr'
@@ -176,5 +180,86 @@ describe('qr text and exports', () => {
     expect(qrExportName('abc12', 'pdf')).toBe('shortly-abc12.pdf')
     expect(qrExportName('abc12', 'txt')).toBe('shortly-abc12.txt')
     expect(new Set(FORMATS.map((item) => item.extension)).size).toBe(FORMATS.length)
+  })
+})
+
+describe('pasted content', () => {
+  test('keeps full URLs and names exports after the host and last path segment', () => {
+    const result = pastedContent('  https://www.example.com/menu/dinner?x=1  ')
+    expect(result).toMatchObject({
+      text: 'https://www.example.com/menu/dinner?x=1',
+      kind: 'url',
+      normalized: false,
+      error: null,
+      name: 'example-com-dinner',
+      caption: 'www.example.com/menu/dinner?x=1',
+    })
+  })
+
+  test('adds a scheme to bare hosts so phones open them', () => {
+    expect(pastedContent('example.com/a').text).toBe('https://example.com/a')
+    expect(pastedContent('example.com/a').normalized).toBe(true)
+    expect(pastedContent('localhost:8000/K4C5B').text).toBe('http://localhost:8000/K4C5B')
+    expect(pastedContent('localhost:8000/K4C5B').kind).toBe('url')
+  })
+
+  test('encodes other schemes and plain text as they are', () => {
+    expect(pastedContent('mailto:hi@example.com')).toMatchObject({ text: 'mailto:hi@example.com', kind: 'text', normalized: false })
+    expect(pastedContent('WIFI:T:WPA;S:cafe;P:secret;;').text).toBe('WIFI:T:WPA;S:cafe;P:secret;;')
+    const note = pastedContent('Table 4, ask for Sam')
+    expect(note).toMatchObject({ kind: 'text', normalized: false, name: 'table-4-ask-for-sam' })
+  })
+
+  test('rejects script schemes and content too large for a QR code', () => {
+    expect(pastedContent('javascript:alert(1)').error).toContain('not allowed')
+    expect(pastedContent('JavaScript:alert(1)').text).toBe('')
+    const huge = pastedContent(`https://example.com/${'a'.repeat(1300)}`)
+    expect(huge.error).toContain('bytes')
+    expect(huge.text).toBe('')
+  })
+
+  test('empty input is neutral, long captions are shortened, and versions map from size', () => {
+    expect(pastedContent('   ')).toMatchObject({ text: '', error: null })
+    expect(pastedContent(`https://example.com/${'b'.repeat(100)}`).caption.length).toBe(60)
+    expect(pastedContent('ok').name).toBe('ok')
+    expect(pastedContent('!!!').name).toBe('qr-text')
+    expect(qrVersion(21)).toBe(1)
+    expect(qrVersion(177)).toBe(40)
+  })
+
+  test('the largest accepted paste still renders at level H', () => {
+    const max = pastedContent(`https://example.com/${'c'.repeat(MAX_PASTE_BYTES - 20)}`)
+    expect(max.error).toBeNull()
+    expect(() => qrSvg(max.text, { ...DEFAULT_DESIGN, center: { kind: 'text', text: 'HI' } }, 128)).not.toThrow()
+  })
+})
+
+describe('density warnings', () => {
+  const long = (n: number) => `https://example.com/${'x'.repeat(n)}`
+
+  test('short content adds no density warning', () => {
+    const { count } = qrGeometry(URL, DEFAULT_DESIGN)
+    expect(scanWarnings(DEFAULT_DESIGN, count)).toEqual([])
+  })
+
+  test('dense codes get a print-size warning', () => {
+    const { count } = qrGeometry(long(300), DEFAULT_DESIGN)
+    const [warning] = scanWarnings(DEFAULT_DESIGN, count)
+    expect(warning.level).toBe('warning')
+    expect(warning.message).toContain(`version ${qrVersion(count)}`)
+    expect(warning.message).toContain(`${minPrintCm(count, DEFAULT_DESIGN.margin)} cm`)
+  })
+
+  test('styles past their tested limit are errors, square is not', () => {
+    const text = long(1100)
+    const dots = { ...DEFAULT_DESIGN, moduleStyle: 'dots' as const }
+    expect(scanWarnings(dots, qrGeometry(text, dots).count)[0]).toMatchObject({ level: 'error' })
+    expect(scanWarnings(DEFAULT_DESIGN, qrGeometry(text, DEFAULT_DESIGN).count).every((item) => item.level === 'warning')).toBe(true)
+  })
+
+  test('minimum print width scales with modules and quiet zone', () => {
+    expect(minPrintCm(21, 2)).toBe(1)
+    expect(minPrintCm(117, 4)).toBe(5)
+    expect(minPrintCm(125, 4)).toBe(6)
   })
 })

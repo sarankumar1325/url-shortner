@@ -97,6 +97,9 @@ The table is capped at 500 links, sorted by clicks.
 
 The QR studio (`/qr`) runs entirely in the browser; nothing is uploaded.
 
+- **Content:** pick one of the workspace's short links, or paste any link or text into the box (or use **Paste from clipboard**). Bare hosts such as `example.com/menu` get `https://` added so phones open them as links; `javascript:`, `data:` and similar schemes are refused, and content over 1,200 bytes is rejected because it would not fit a code at level H. Pasted content is encoded as is, so its scans are not counted in analytics. Workspaces without links start in paste mode.
+- **Density:** the preview shows the QR version and module count. Above version 10 the studio suggests a minimum print width (about 0.4 mm per module). Each style has a tested density limit (square had none up to version 28, the densest tried; bars 22; rounded, dots, dither and halftone 20; diamond and ASCII 17). Past it, the style tile is marked **Too dense** and the warning becomes an error.
+
 - **Styles:** square, rounded, dots, bars, diamond, dither (an ordered 3×3 dither that fades across the code), halftone (dots that shrink toward the edges) and ASCII (characters instead of shapes, from `#@%&`, `0 1` or the link's own code). Finder patterns can be square, rounded or circular.
 - **Fonts:** sans, serif, mono, rounded and display, used for the center label and ASCII glyphs. Fonts are loaded before a raster export so the file matches the preview.
 - **Scan safety:** a center label or logo, or any artistic style, raises error correction to level H. Low contrast, inverted colors, a thin quiet zone and artistic styles show warnings. Every style, eye and font combination decodes with Chrome's built-in `BarcodeDetector` at 600 px, but test-scan prints anyway.

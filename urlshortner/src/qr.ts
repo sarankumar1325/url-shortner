@@ -58,15 +58,17 @@ export const DEFAULT_DESIGN: QrDesign = {
   asciiCharset: 'symbols',
 }
 
-export const MODULE_STYLES: { value: ModuleStyle; label: string; artistic: boolean }[] = [
-  { value: 'square', label: 'Square', artistic: false },
-  { value: 'rounded', label: 'Rounded', artistic: false },
-  { value: 'dots', label: 'Dots', artistic: false },
-  { value: 'bars', label: 'Bars', artistic: false },
-  { value: 'diamond', label: 'Diamond', artistic: true },
-  { value: 'dither', label: 'Dither', artistic: true },
-  { value: 'halftone', label: 'Halftone', artistic: true },
-  { value: 'ascii', label: 'ASCII', artistic: true },
+// maxVersion is the densest code each style decoded at in testing (2048 px render, Chrome's
+// BarcodeDetector, square and circle eyes); square still decoded at the largest size tried.
+export const MODULE_STYLES: { value: ModuleStyle; label: string; artistic: boolean; maxVersion: number }[] = [
+  { value: 'square', label: 'Square', artistic: false, maxVersion: 40 },
+  { value: 'rounded', label: 'Rounded', artistic: false, maxVersion: 20 },
+  { value: 'dots', label: 'Dots', artistic: false, maxVersion: 20 },
+  { value: 'bars', label: 'Bars', artistic: false, maxVersion: 22 },
+  { value: 'diamond', label: 'Diamond', artistic: true, maxVersion: 17 },
+  { value: 'dither', label: 'Dither', artistic: true, maxVersion: 20 },
+  { value: 'halftone', label: 'Halftone', artistic: true, maxVersion: 20 },
+  { value: 'ascii', label: 'ASCII', artistic: true, maxVersion: 17 },
 ]
 
 export const FONTS: { value: QrFont; label: string; stack: string; weight: number }[] = [
@@ -365,8 +367,33 @@ export function contrastRatio(a: string, b: string): number | null {
 
 export type ScanWarning = { level: 'error' | 'warning'; message: string }
 
-export function scanWarnings(design: QrDesign): ScanWarning[] {
+export const DENSE_VERSION = 10
+// About 0.4 mm per module is the smallest most phone cameras resolve at arm's length.
+const MIN_MODULE_MM = 0.4
+
+/** Smallest printed width, in whole centimeters, for a code with this many modules per side. */
+export function minPrintCm(count: number, margin: number): number {
+  return Math.ceil(((count + 2 * Math.max(0, margin)) * MIN_MODULE_MM) / 10)
+}
+
+/** Warnings for a design; pass the module count once content is known to check density too. */
+export function scanWarnings(design: QrDesign, count = 0): ScanWarning[] {
   const warnings: ScanWarning[] = []
+  if (count > 0) {
+    const version = qrVersion(count)
+    const style = MODULE_STYLES.find((item) => item.value === design.moduleStyle) ?? MODULE_STYLES[0]
+    if (version > style.maxVersion) {
+      warnings.push({
+        level: 'error',
+        message: `${style.label} codes this dense (version ${version}) failed to scan in testing. Switch to Square or shorten the content.`,
+      })
+    } else if (version > DENSE_VERSION) {
+      warnings.push({
+        level: 'warning',
+        message: `Dense code: version ${version}, ${count}×${count} modules. Print it at least ${minPrintCm(count, design.margin)} cm wide and test-scan it.`,
+      })
+    }
+  }
   const ratio = contrastRatio(design.foreground, design.background)
   if (ratio !== null && ratio < 3) {
     warnings.push({
@@ -402,6 +429,90 @@ export function scanWarnings(design: QrDesign): ScanWarning[] {
   return warnings
 }
 
+/** Byte budget for pasted content: version 40 at level H holds 1,273 bytes, minus headroom. */
+export const MAX_PASTE_BYTES = 1200
+const BLOCKED_SCHEMES = new Set(['javascript', 'data', 'vbscript', 'file', 'blob'])
+const BARE_HOST = /^(localhost|[a-z0-9-]+(\.[a-z0-9-]+)+)(:\d{1,5})?([/?#]\S*)?$/i
+
+export type PastedContent = {
+  /** Exactly what the code will encode, or '' when nothing usable was pasted. */
+  text: string
+  kind: 'url' | 'text'
+  /** True when a scheme was added so phones open the value as a link. */
+  normalized: boolean
+  error: string | null
+  /** File-name stem for exports. */
+  name: string
+  /** Short human label for captions and the preview. */
+  caption: string
+}
+
+function slug(value: string, fallback: string): string {
+  const stem = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40)
+    .replace(/-+$/, '')
+  return stem || fallback
+}
+
+function shorten(value: string, max = 60): string {
+  const flat = value.replace(/\s+/g, ' ')
+  return flat.length > max ? `${flat.slice(0, max - 3)}...` : flat
+}
+
+export function pastedContent(raw: string): PastedContent {
+  const value = raw.trim()
+  const empty = { text: '', kind: 'text' as const, normalized: false, name: 'qr', caption: '' }
+  if (!value) return { ...empty, error: null }
+
+  let text = value
+  let normalized = false
+  // A scheme is letters then a colon not followed by a port number, so "localhost:8000/x" is a host.
+  const scheme = /^([a-z][a-z0-9+.-]*):(?!\d)/i.exec(value)?.[1].toLowerCase()
+  if (scheme && BLOCKED_SCHEMES.has(scheme)) {
+    return { ...empty, error: `${scheme}: links are not allowed in a QR code.` }
+  }
+  if (!scheme && !/\s/.test(value) && BARE_HOST.test(value)) {
+    text = `${/^localhost\b/i.test(value) ? 'http' : 'https'}://${value}`
+    normalized = true
+  }
+
+  const bytes = new TextEncoder().encode(text).length
+  if (bytes > MAX_PASTE_BYTES) {
+    return {
+      ...empty,
+      error: `That is ${bytes.toLocaleString('en-US')} bytes; a QR code holds about ${MAX_PASTE_BYTES.toLocaleString('en-US')}. Shorten it first.`,
+    }
+  }
+
+  let url: URL | null = null
+  if (/^https?:\/\//i.test(text)) {
+    try {
+      url = new URL(text)
+    } catch {
+      url = null
+    }
+  }
+  if (url) {
+    const path = url.pathname.split('/').filter(Boolean).at(-1) ?? ''
+    return {
+      text,
+      kind: 'url',
+      normalized,
+      error: null,
+      name: slug(`${url.hostname.replace(/^www\./, '')}${path ? `-${path}` : ''}`, 'qr'),
+      caption: shorten(text.replace(/^https?:\/\//i, '').replace(/\/$/, '')),
+    }
+  }
+  return { text, kind: 'text', normalized, error: null, name: slug(text, 'qr-text'), caption: shorten(text) }
+}
+
+/** QR version 1–40 from the modules per side. */
+export function qrVersion(count: number): number {
+  return (count - 17) / 4
+}
 export type QrFormat = 'png' | 'jpeg' | 'webp' | 'svg' | 'pdf' | 'txt'
 
 export const FORMATS: { value: QrFormat; label: string; mime: string; extension: string }[] = [
