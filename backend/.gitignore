@@ -19,3 +19,5 @@ wheels/
 .ruff_cache/
 .coverage
 htmlcov/
+.vercel
+.env*
