@@ -190,10 +190,7 @@ def test_fallback_errors_name_the_fallback_field() -> None:
 
 
 def test_replay_hash_is_unchanged_when_new_fields_are_unset() -> None:
-    before = (
-        b'{"custom_alias":null,"expires_at":null,'
-        b'"long_url":"https://example.com/","tags":[]}'
-    )
+    before = b'{"custom_alias":null,"expires_at":null,"long_url":"https://example.com/","tags":[]}'
     assert links_service._canonical_request("https://example.com/", None, None, []) == before
     assert b"max_clicks" in links_service._canonical_request(
         "https://example.com/", None, None, [], None, 5
