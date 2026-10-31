@@ -1,7 +1,10 @@
-import { useState, type ChangeEvent } from 'react'
+import { useMemo, useState, type CSSProperties, type ChangeEvent } from 'react'
 import {
   AlertTriangle,
+  ArrowLeftRight,
   Check,
+  ClipboardCopy,
+  Code2,
   Copy,
   Download,
   FileArchive,
@@ -10,31 +13,34 @@ import {
   QrCode,
   RotateCcw,
   ShieldCheck,
+  Type,
 } from 'lucide-react'
 import { Link, useSearchParams } from 'react-router-dom'
 import type { QRCodeErrorCorrectionLevel } from 'qrcode'
+import { displayShortUrl, previewUrl, titleFor, type LinkRecord } from './links'
+import { PDF_SIZES_CM, pdfPixels, type PdfPage } from './pdf'
 import {
-  displayShortUrl,
-  previewUrl,
-  qrFileName,
-  titleFor,
-  type LinkRecord,
-} from './links'
-import {
+  ASCII_CHARSETS,
   DEFAULT_DESIGN,
+  FONTS,
+  FORMATS,
   MAX_CENTER_TEXT,
-  centerFontSize,
+  MODULE_STYLES,
   effectiveErrorCorrection,
-  qrGeometry,
+  formatInfo,
+  isArtistic,
   qrSvg,
-  qrSvgFileName,
+  qrText,
   scanWarnings,
   zipFileName,
   zipFiles,
+  type AsciiCharset,
   type EyeStyle,
-  type ModuleStyle,
   type QrDesign,
+  type QrFont,
+  type QrFormat,
 } from './qr'
+import { canCopyImages, copyPng, exportQr, saveBlob, type PdfOptions } from './qrExport'
 import './explore.css'
 
 const PRESETS: { name: string; foreground: string; background: string }[] = [
@@ -44,84 +50,16 @@ const PRESETS: { name: string; foreground: string; background: string }[] = [
   { name: 'Plum', foreground: '#5b2a86', background: '#faf7fd' },
   { name: 'Ember', foreground: '#a3361b', background: '#fff7f2' },
   { name: 'Sand', foreground: '#3d3428', background: '#f6f0de' },
+  { name: 'Terminal', foreground: '#0f3d1f', background: '#e9f7ec' },
+  { name: 'Mono', foreground: '#000000', background: '#ffffff' },
 ]
 
 const MAX_LOGO_BYTES = 512 * 1024
 
-type Format = 'png' | 'svg'
 type CenterMode = 'none' | 'text' | 'logo'
 
-function loadImage(src: string): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const image = new Image()
-    image.onload = () => resolve(image)
-    image.onerror = () => reject(new Error('image failed to load'))
-    image.src = src
-  })
-}
-
-async function renderPng(text: string, design: QrDesign, pixels: number): Promise<Blob> {
-  const { extent, path, center } = qrGeometry(text, design)
-  const canvas = document.createElement('canvas')
-  canvas.width = pixels
-  canvas.height = pixels
-  const context = canvas.getContext('2d')
-  if (!context) throw new Error('canvas unavailable')
-  const scale = pixels / extent
-  context.scale(scale, scale)
-  context.fillStyle = design.background
-  context.fillRect(0, 0, extent, extent)
-  context.fillStyle = design.foreground
-  context.fill(new Path2D(path), 'evenodd')
-  if (center) {
-    const pad = 0.35
-    context.fillStyle = design.background
-    context.beginPath()
-    context.roundRect(
-      center.x + pad,
-      center.y + pad,
-      center.size - pad * 2,
-      center.size - pad * 2,
-      center.size * 0.18,
-    )
-    context.fill()
-    if (design.center.kind === 'text') {
-      const label = design.center.text.slice(0, MAX_CENTER_TEXT)
-      context.fillStyle = design.foreground
-      context.font = `700 ${centerFontSize(center.size, label)}px Inter, Helvetica, Arial, sans-serif`
-      context.textAlign = 'center'
-      context.textBaseline = 'middle'
-      context.fillText(label, center.x + center.size / 2, center.y + center.size / 2)
-    } else if (design.center.kind === 'logo') {
-      const image = await loadImage(design.center.dataUrl)
-      const box = center.size * 0.68
-      const ratio = Math.min(box / image.width, box / image.height)
-      const width = image.width * ratio
-      const height = image.height * ratio
-      context.drawImage(
-        image,
-        center.x + (center.size - width) / 2,
-        center.y + (center.size - height) / 2,
-        width,
-        height,
-      )
-    }
-  }
-  return new Promise((resolve, reject) =>
-    canvas.toBlob(
-      (blob) => (blob ? resolve(blob) : reject(new Error('png failed'))),
-      'image/png',
-    ),
-  )
-}
-
-function saveBlob(name: string, blob: Blob) {
-  const url = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = name
-  anchor.click()
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+function svgDataUrl(svg: string) {
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`
 }
 
 function Segmented<T extends string>({
@@ -132,7 +70,7 @@ function Segmented<T extends string>({
 }: {
   label: string
   value: T
-  options: { value: T; label: string }[]
+  options: { value: T; label: string; style?: CSSProperties }[]
   onChange: (value: T) => void
 }) {
   return (
@@ -144,6 +82,7 @@ function Segmented<T extends string>({
           role="radio"
           aria-checked={value === option.value}
           className={value === option.value ? 'active' : ''}
+          style={option.style}
           onClick={() => onChange(option.value)}
         >
           {option.label}
@@ -193,6 +132,24 @@ function ColorField({
   )
 }
 
+function useQrPreviews(encoded: string, design: QrDesign, links: LinkRecord[]) {
+  const previewSvg = useMemo(() => (encoded ? qrSvg(encoded, design, 320) : ''), [encoded, design])
+  const tiles = useMemo(() => {
+    if (!encoded) return new Map<string, string>()
+    const base = { ...design, center: { kind: 'none' as const }, margin: 1 }
+    return new Map(
+      MODULE_STYLES.map((style) => [style.value, svgDataUrl(qrSvg(encoded, { ...base, moduleStyle: style.value }, 72))]),
+    )
+  }, [encoded, design])
+  const thumbs = useMemo(() => {
+    const base = { ...design, margin: 1 }
+    return new Map(
+      links.filter((item) => item.shortUrl).map((item) => [item.code, svgDataUrl(qrSvg(item.shortUrl, base, 44))]),
+    )
+  }, [links, design])
+  return { previewSvg, tiles, thumbs }
+}
+
 export default function QrStudio({
   links,
   loading,
@@ -213,17 +170,19 @@ export default function QrStudio({
   const [centerText, setCenterText] = useState('')
   const [logoUrl, setLogoUrl] = useState('')
   const [logoError, setLogoError] = useState('')
-  const [busy, setBusy] = useState<'png' | 'svg' | 'zip' | null>(null)
+  const [format, setFormat] = useState<QrFormat>('png')
+  const [pdf, setPdf] = useState<PdfOptions>({ sizeCm: 5, page: 'fit', caption: true })
+  const [busy, setBusy] = useState<string | null>(null)
   const [selected, setSelected] = useState<Set<string>>(new Set())
-  const [bulkFormat, setBulkFormat] = useState<Format>('png')
+  const [bulkFormat, setBulkFormat] = useState<QrFormat>('png')
   const [progress, setProgress] = useState(0)
 
   const active = links.filter((link) => link.shortUrl)
   const link = active.find((item) => item.code === requested) ?? active[0]
   const encoded = link ? (safeScan ? previewUrl(link.shortUrl) : link.shortUrl) : ''
   const warnings = scanWarnings(design)
-  const svg = encoded ? qrSvg(encoded, design, 320) : ''
-  const preview = svg ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}` : ''
+  const { previewSvg, tiles, thumbs } = useQrPreviews(encoded, design, links)
+  const usesText = design.center.kind === 'text' || design.moduleStyle === 'ascii'
 
   function update(patch: Partial<QrDesign>) {
     setDesign((current) => ({ ...current, ...patch }))
@@ -270,33 +229,47 @@ export default function QrStudio({
     reader.readAsDataURL(file)
   }
 
-  async function download(format: Format) {
+  function exportOptions(item: LinkRecord) {
+    return { pixels, pdf, code: item.code, caption: displayShortUrl(item.shortUrl) }
+  }
+
+  async function download() {
     if (!link || !encoded) return
-    setBusy(format)
+    setBusy('download')
     try {
-      if (format === 'svg') {
-        saveBlob(
-          qrSvgFileName(link.code),
-          new Blob([qrSvg(encoded, design, pixels)], { type: 'image/svg+xml' }),
-        )
-      } else {
-        saveBlob(qrFileName(link.code), await renderPng(encoded, design, pixels))
-      }
-      notify(`QR code downloaded as ${format.toUpperCase()}.`)
-    } catch {
-      notify('The QR code could not be generated.')
+      const { name, blob } = await exportQr(format, encoded, design, exportOptions(link))
+      saveBlob(name, blob)
+      notify(`QR code downloaded as ${formatInfo(format).label}.`)
+    } catch (failure) {
+      notify(failure instanceof Error && failure.message.includes('not supported')
+        ? `${formatInfo(format).label} export is not supported by this browser.`
+        : 'The QR code could not be generated.')
     } finally {
       setBusy(null)
     }
   }
 
-  async function copySvg() {
+  async function copy(kind: 'image' | 'svg' | 'text' | 'link') {
     if (!encoded) return
+    setBusy(`copy-${kind}`)
     try {
-      await navigator.clipboard.writeText(qrSvg(encoded, design, pixels))
-      notify('SVG markup copied.')
+      if (kind === 'image') await copyPng(encoded, design, pixels)
+      else if (kind === 'svg') await navigator.clipboard.writeText(qrSvg(encoded, design, pixels))
+      else if (kind === 'text') await navigator.clipboard.writeText(qrText(encoded, design))
+      else await navigator.clipboard.writeText(encoded)
+      notify(
+        kind === 'image'
+          ? 'QR image copied. Paste it into any app.'
+          : kind === 'svg'
+            ? 'SVG markup copied.'
+            : kind === 'text'
+              ? 'QR code copied as text.'
+              : 'Link copied.',
+      )
     } catch {
-      notify('Clipboard access is unavailable.')
+      notify('Clipboard access is unavailable here.')
+    } finally {
+      setBusy(null)
     }
   }
 
@@ -306,30 +279,16 @@ export default function QrStudio({
     setBusy('zip')
     setProgress(0)
     try {
-      const encoder = new TextEncoder()
       const files: { name: string; data: Uint8Array }[] = []
       for (const [index, item] of chosen.entries()) {
         const target = safeScan ? previewUrl(item.shortUrl) : item.shortUrl
-        if (bulkFormat === 'svg') {
-          files.push({
-            name: qrSvgFileName(item.code),
-            data: encoder.encode(qrSvg(target, design, pixels)),
-          })
-        } else {
-          const blob = await renderPng(target, design, pixels)
-          files.push({
-            name: qrFileName(item.code),
-            data: new Uint8Array(await blob.arrayBuffer()),
-          })
-        }
+        const { name, blob } = await exportQr(bulkFormat, target, design, exportOptions(item))
+        files.push({ name, data: new Uint8Array(await blob.arrayBuffer()) })
         setProgress((index + 1) / chosen.length)
       }
       const zip = zipFiles(files)
-      saveBlob(
-        zipFileName(),
-        new Blob([zip.buffer as ArrayBuffer], { type: 'application/zip' }),
-      )
-      notify(`${files.length} QR code${files.length === 1 ? '' : 's'} zipped.`)
+      saveBlob(zipFileName(), new Blob([zip as BlobPart], { type: 'application/zip' }))
+      notify(`${files.length} QR code${files.length === 1 ? '' : 's'} zipped as ${formatInfo(bulkFormat).label}.`)
     } catch {
       notify('The ZIP could not be created.')
     } finally {
@@ -349,6 +308,8 @@ export default function QrStudio({
 
   const allSelected = active.length > 0 && active.every((item) => selected.has(item.code))
   const ecc = effectiveErrorCorrection(design)
+  const forcedEcc = design.center.kind !== 'none' || isArtistic(design.moduleStyle)
+  const info = formatInfo(format)
 
   return (
     <div className="explore-page">
@@ -356,8 +317,8 @@ export default function QrStudio({
         <span className="eyebrow">QR studio</span>
         <h1 tabIndex={-1}>Codes that look like yours.</h1>
         <p>
-          Style a QR code for any link in {workspaceName}, check that it will
-          scan, and export one or all of them.
+          Style a QR code for any link in {workspaceName}, check that it will scan, then copy it
+          or export one or all of them in the format you need.
         </p>
       </div>
 
@@ -379,11 +340,7 @@ export default function QrStudio({
             <section className="panel qr-controls" aria-label="QR code design">
               <div className="control-group">
                 <label htmlFor="qr-link">Link</label>
-                <select
-                  id="qr-link"
-                  value={link.code}
-                  onChange={(event) => chooseLink(event.target.value)}
-                >
+                <select id="qr-link" value={link.code} onChange={(event) => chooseLink(event.target.value)}>
                   {active.map((item) => (
                     <option key={item.code} value={item.code}>
                       {displayShortUrl(item.shortUrl)} → {titleFor(item.destination)}
@@ -391,25 +348,64 @@ export default function QrStudio({
                   ))}
                 </select>
                 <label className="check-row">
-                  <input
-                    type="checkbox"
-                    checked={safeScan}
-                    onChange={(event) => setSafeScan(event.target.checked)}
-                  />
+                  <input type="checkbox" checked={safeScan} onChange={(event) => setSafeScan(event.target.checked)} />
                   <span>
-                    <strong>Safe scan.</strong> Encode the Peek link so people
-                    see the destination before they visit.
+                    <strong>Safe scan.</strong> Encode the Peek link so people see the destination
+                    before they visit.
                   </span>
                 </label>
+              </div>
+
+              <div className="control-group">
+                <span className="control-label">Style</span>
+                <div className="style-tiles" role="radiogroup" aria-label="Module style">
+                  {MODULE_STYLES.map((style) => (
+                    <button
+                      key={style.value}
+                      type="button"
+                      role="radio"
+                      aria-checked={design.moduleStyle === style.value}
+                      className={`style-tile ${design.moduleStyle === style.value ? 'active' : ''}`}
+                      onClick={() => update({ moduleStyle: style.value })}
+                    >
+                      <img src={tiles.get(style.value)} alt="" width={72} height={72} />
+                      <span>{style.label}</span>
+                      {style.artistic && <span className="tile-badge">Art</span>}
+                    </button>
+                  ))}
+                </div>
+                {design.moduleStyle === 'ascii' && (
+                  <div className="sub-control">
+                    <span className="control-label">Characters</span>
+                    <Segmented<AsciiCharset>
+                      label="ASCII characters"
+                      value={design.asciiCharset}
+                      options={ASCII_CHARSETS}
+                      onChange={(asciiCharset) => update({ asciiCharset })}
+                    />
+                  </div>
+                )}
+              </div>
+
+              <div className="control-group">
+                <span className="control-label">Corners</span>
+                <Segmented<EyeStyle>
+                  label="Corner style"
+                  value={design.eyeStyle}
+                  options={[
+                    { value: 'square', label: 'Square' },
+                    { value: 'rounded', label: 'Rounded' },
+                    { value: 'circle', label: 'Circle' },
+                  ]}
+                  onChange={(eyeStyle) => update({ eyeStyle })}
+                />
               </div>
 
               <div className="control-group">
                 <span className="control-label">Colors</span>
                 <div className="swatches" role="group" aria-label="Color presets">
                   {PRESETS.map((preset) => {
-                    const on =
-                      design.foreground === preset.foreground &&
-                      design.background === preset.background
+                    const on = design.foreground === preset.foreground && design.background === preset.background
                     return (
                       <button
                         key={preset.name}
@@ -417,12 +413,7 @@ export default function QrStudio({
                         className={`swatch ${on ? 'active' : ''}`}
                         aria-pressed={on}
                         title={preset.name}
-                        onClick={() =>
-                          update({
-                            foreground: preset.foreground,
-                            background: preset.background,
-                          })
-                        }
+                        onClick={() => update({ foreground: preset.foreground, background: preset.background })}
                         style={{ background: preset.background }}
                       >
                         <span style={{ background: preset.foreground }} />
@@ -430,48 +421,19 @@ export default function QrStudio({
                       </button>
                     )
                   })}
+                  <button
+                    type="button"
+                    className="swatch swap"
+                    title="Swap foreground and background"
+                    aria-label="Swap foreground and background"
+                    onClick={() => update({ foreground: design.background, background: design.foreground })}
+                  >
+                    <ArrowLeftRight size={15} />
+                  </button>
                 </div>
                 <div className="color-row">
-                  <ColorField
-                    id="qr-fg"
-                    label="Foreground"
-                    value={design.foreground}
-                    onChange={(foreground) => update({ foreground })}
-                  />
-                  <ColorField
-                    id="qr-bg"
-                    label="Background"
-                    value={design.background}
-                    onChange={(background) => update({ background })}
-                  />
-                </div>
-              </div>
-
-              <div className="control-group two-up">
-                <div>
-                  <span className="control-label">Modules</span>
-                  <Segmented<ModuleStyle>
-                    label="Module style"
-                    value={design.moduleStyle}
-                    options={[
-                      { value: 'square', label: 'Square' },
-                      { value: 'rounded', label: 'Rounded' },
-                      { value: 'dots', label: 'Dots' },
-                    ]}
-                    onChange={(moduleStyle) => update({ moduleStyle })}
-                  />
-                </div>
-                <div>
-                  <span className="control-label">Corners</span>
-                  <Segmented<EyeStyle>
-                    label="Corner style"
-                    value={design.eyeStyle}
-                    options={[
-                      { value: 'square', label: 'Square' },
-                      { value: 'rounded', label: 'Rounded' },
-                    ]}
-                    onChange={(eyeStyle) => update({ eyeStyle })}
-                  />
+                  <ColorField id="qr-fg" label="Foreground" value={design.foreground} onChange={(foreground) => update({ foreground })} />
+                  <ColorField id="qr-bg" label="Background" value={design.background} onChange={(background) => update({ background })} />
                 </div>
               </div>
 
@@ -504,12 +466,7 @@ export default function QrStudio({
                   <label className="upload-button">
                     <ImageUp size={16} />
                     {design.center.kind === 'logo' ? 'Replace logo' : 'Upload a logo'}
-                    <input
-                      type="file"
-                      accept="image/png,image/jpeg,image/svg+xml,image/webp"
-                      className="sr-only"
-                      onChange={onLogo}
-                    />
+                    <input type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" className="sr-only" onChange={onLogo} />
                   </label>
                 )}
                 {logoError && (
@@ -517,42 +474,39 @@ export default function QrStudio({
                     {logoError}
                   </p>
                 )}
-                {centerMode !== 'none' && (
-                  <p className="meta">
-                    Error correction is raised to H so the code still scans with
-                    the center covered.
-                  </p>
-                )}
+              </div>
+
+              <div className={`control-group ${usesText ? '' : 'muted-group'}`}>
+                <span className="control-label">
+                  <span>
+                    <Type size={13} aria-hidden="true" /> Font
+                  </span>
+                  {!usesText && <span className="numeric">for center text and ASCII</span>}
+                </span>
+                <Segmented<QrFont>
+                  label="Font"
+                  value={design.font}
+                  options={FONTS.map((font) => ({
+                    value: font.value,
+                    label: font.label,
+                    style: { fontFamily: font.stack, fontWeight: font.weight },
+                  }))}
+                  onChange={(font) => update({ font })}
+                />
               </div>
 
               <div className="control-group two-up">
                 <div>
                   <label htmlFor="qr-size" className="control-label">
-                    Export size <span className="numeric">{pixels} px</span>
+                    Image size <span className="numeric">{pixels} px</span>
                   </label>
-                  <input
-                    id="qr-size"
-                    type="range"
-                    min={256}
-                    max={2048}
-                    step={64}
-                    value={pixels}
-                    onChange={(event) => setPixels(Number(event.target.value))}
-                  />
+                  <input id="qr-size" type="range" min={256} max={4096} step={64} value={pixels} onChange={(event) => setPixels(Number(event.target.value))} />
                 </div>
                 <div>
                   <label htmlFor="qr-margin" className="control-label">
-                    Quiet zone{' '}
-                    <span className="numeric">{design.margin} modules</span>
+                    Quiet zone <span className="numeric">{design.margin} modules</span>
                   </label>
-                  <input
-                    id="qr-margin"
-                    type="range"
-                    min={0}
-                    max={8}
-                    value={design.margin}
-                    onChange={(event) => update({ margin: Number(event.target.value) })}
-                  />
+                  <input id="qr-margin" type="range" min={0} max={8} value={design.margin} onChange={(event) => update({ margin: Number(event.target.value) })} />
                 </div>
               </div>
 
@@ -563,18 +517,17 @@ export default function QrStudio({
                 <select
                   id="qr-ecc"
                   value={ecc}
-                  disabled={design.center.kind !== 'none'}
-                  onChange={(event) =>
-                    update({
-                      errorCorrection: event.target.value as QRCodeErrorCorrectionLevel,
-                    })
-                  }
+                  disabled={forcedEcc}
+                  onChange={(event) => update({ errorCorrection: event.target.value as QRCodeErrorCorrectionLevel })}
                 >
                   <option value="L">L · 7% recovery, smallest code</option>
                   <option value="M">M · 15% recovery (default)</option>
                   <option value="Q">Q · 25% recovery</option>
                   <option value="H">H · 30% recovery, densest code</option>
                 </select>
+                {forcedEcc && (
+                  <p className="meta">Raised to H because a center mark or artistic style hides part of each module.</p>
+                )}
               </div>
 
               <button
@@ -592,25 +545,21 @@ export default function QrStudio({
               </button>
             </section>
 
-            <section className="panel qr-preview" aria-label="Preview">
-              <div className="qr-canvas">
-                {preview && (
-                  <img
-                    src={preview}
-                    width={320}
-                    height={320}
-                    alt={`QR code for ${displayShortUrl(encoded)}`}
-                  />
-                )}
-              </div>
+            <section className="panel qr-preview" aria-label="Preview and export">
+              <div
+                className="qr-canvas"
+                role="img"
+                aria-label={`QR code preview for ${displayShortUrl(encoded)}`}
+                // Inline so the preview can use the page's web fonts; the markup is generated and escaped by qrSvg.
+                dangerouslySetInnerHTML={{ __html: previewSvg }}
+              />
               <p className="qr-encoded">
                 <span className="meta">Encodes</span>
                 <code>{displayShortUrl(encoded)}</code>
               </p>
               {warnings.length === 0 ? (
                 <p className="scan-status good">
-                  <ShieldCheck size={15} /> Good contrast and quiet zone. This
-                  should scan reliably.
+                  <ShieldCheck size={15} /> Good contrast and quiet zone. This should scan reliably.
                 </p>
               ) : (
                 <ul className="scan-warnings">
@@ -621,35 +570,81 @@ export default function QrStudio({
                   ))}
                 </ul>
               )}
-              <div className="qr-actions">
-                <button
-                  type="button"
-                  className="primary-button"
-                  disabled={busy !== null}
-                  onClick={() => void download('png')}
-                >
-                  {busy === 'png' ? (
-                    <LoaderCircle size={15} className="spin" />
-                  ) : (
-                    <Download size={15} />
+
+              <div className="export-box">
+                <span className="control-label">Export</span>
+                <div className="format-grid" role="radiogroup" aria-label="Export format">
+                  {FORMATS.map((item) => (
+                    <button
+                      key={item.value}
+                      type="button"
+                      role="radio"
+                      aria-checked={format === item.value}
+                      className={format === item.value ? 'active' : ''}
+                      onClick={() => setFormat(item.value)}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+                {format === 'pdf' ? (
+                  <div className="pdf-options">
+                    <label>
+                      <span>Printed size</span>
+                      <select value={pdf.sizeCm} onChange={(event) => setPdf({ ...pdf, sizeCm: Number(event.target.value) })}>
+                        {PDF_SIZES_CM.map((size) => (
+                          <option key={size} value={size}>
+                            {size} cm ({(size / 2.54).toFixed(1)} in)
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      <span>Page</span>
+                      <select value={pdf.page} onChange={(event) => setPdf({ ...pdf, page: event.target.value as PdfPage })}>
+                        <option value="fit">Fit to code</option>
+                        <option value="a4">A4</option>
+                        <option value="letter">US Letter</option>
+                      </select>
+                    </label>
+                    <label className="check-row">
+                      <input type="checkbox" checked={pdf.caption} onChange={(event) => setPdf({ ...pdf, caption: event.target.checked })} />
+                      <span>Print the short link under the code</span>
+                    </label>
+                    <p className="meta">Rendered at 600 DPI ({pdfPixels(pdf.sizeCm)} px), lossless.</p>
+                  </div>
+                ) : (
+                  <p className="meta export-note">
+                    {format === 'svg'
+                      ? usesText
+                        ? 'Vector, scales to any size. Text uses fonts installed where the SVG is opened.'
+                        : 'Vector, scales to any size.'
+                      : format === 'txt'
+                        ? 'Block characters (██) for dark modules. Paste into a terminal, README, or chat.'
+                        : `${pixels} × ${pixels} px${format === 'jpeg' ? ', no transparency' : ''}.`}
+                  </p>
+                )}
+                <button type="button" className="primary-button export-button" disabled={busy !== null} onClick={() => void download()}>
+                  {busy === 'download' ? <LoaderCircle size={15} className="spin" /> : <Download size={15} />}
+                  Download {info.label}
+                </button>
+                <div className="copy-row">
+                  {canCopyImages() && (
+                    <button type="button" className="secondary-button" disabled={busy !== null} onClick={() => void copy('image')}>
+                      {busy === 'copy-image' ? <LoaderCircle size={15} className="spin" /> : <ClipboardCopy size={15} />}
+                      Copy image
+                    </button>
                   )}
-                  PNG
-                </button>
-                <button
-                  type="button"
-                  className="secondary-button"
-                  disabled={busy !== null}
-                  onClick={() => void download('svg')}
-                >
-                  <Download size={15} /> SVG
-                </button>
-                <button
-                  type="button"
-                  className="secondary-button"
-                  onClick={() => void copySvg()}
-                >
-                  <Copy size={15} /> Copy SVG
-                </button>
+                  <button type="button" className="secondary-button" disabled={busy !== null} onClick={() => void copy('svg')}>
+                    <Code2 size={15} /> Copy SVG
+                  </button>
+                  <button type="button" className="secondary-button" disabled={busy !== null} onClick={() => void copy('text')}>
+                    <Type size={15} /> Copy as text
+                  </button>
+                  <button type="button" className="secondary-button" disabled={busy !== null} onClick={() => void copy('link')}>
+                    <Copy size={15} /> Copy link
+                  </button>
+                </div>
               </div>
             </section>
           </div>
@@ -658,35 +653,22 @@ export default function QrStudio({
             <div className="section-heading">
               <div>
                 <h2 id="bulk-heading">Bulk export</h2>
-                <p className="meta">
-                  Every selected link gets this design, zipped into one
-                  download.
-                </p>
+                <p className="meta">Every selected link gets this design, zipped into one download.</p>
               </div>
               <div className="bulk-actions">
-                <Segmented<Format>
-                  label="Bulk format"
-                  value={bulkFormat}
-                  options={[
-                    { value: 'png', label: 'PNG' },
-                    { value: 'svg', label: 'SVG' },
-                  ]}
-                  onChange={setBulkFormat}
-                />
-                <button
-                  type="button"
-                  className="primary-button"
-                  disabled={selected.size === 0 || busy !== null}
-                  onClick={() => void downloadZip()}
-                >
-                  {busy === 'zip' ? (
-                    <LoaderCircle size={15} className="spin" />
-                  ) : (
-                    <FileArchive size={15} />
-                  )}
-                  {busy === 'zip'
-                    ? `Zipping ${Math.round(progress * 100)}%`
-                    : `Download ZIP (${selected.size})`}
+                <label className="sr-only" htmlFor="bulk-format">
+                  Bulk format
+                </label>
+                <select id="bulk-format" value={bulkFormat} onChange={(event) => setBulkFormat(event.target.value as QrFormat)}>
+                  {FORMATS.map((item) => (
+                    <option key={item.value} value={item.value}>
+                      {item.label}
+                    </option>
+                  ))}
+                </select>
+                <button type="button" className="primary-button" disabled={selected.size === 0 || busy !== null} onClick={() => void downloadZip()}>
+                  {busy === 'zip' ? <LoaderCircle size={15} className="spin" /> : <FileArchive size={15} />}
+                  {busy === 'zip' ? `Zipping ${Math.round(progress * 100)}%` : `Download ZIP (${selected.size})`}
                 </button>
               </div>
             </div>
@@ -694,11 +676,7 @@ export default function QrStudio({
               <input
                 type="checkbox"
                 checked={allSelected}
-                onChange={() =>
-                  setSelected(
-                    allSelected ? new Set() : new Set(active.map((item) => item.code)),
-                  )
-                }
+                onChange={() => setSelected(allSelected ? new Set() : new Set(active.map((item) => item.code)))}
               />
               <span>Select all {active.length} links</span>
             </label>
@@ -706,18 +684,13 @@ export default function QrStudio({
               {active.map((item) => (
                 <li key={item.code}>
                   <label className="check-row">
-                    <input
-                      type="checkbox"
-                      checked={selected.has(item.code)}
-                      onChange={() => toggle(item.code)}
-                    />
+                    <input type="checkbox" checked={selected.has(item.code)} onChange={() => toggle(item.code)} />
+                    <img className="bulk-thumb" src={thumbs.get(item.code)} alt="" width={44} height={44} />
                     <span className="bulk-link">
                       <strong>{displayShortUrl(item.shortUrl)}</strong>
                       <span>{titleFor(item.destination)}</span>
                     </span>
-                    {selected.has(item.code) && (
-                      <Check size={14} className="bulk-check" aria-hidden="true" />
-                    )}
+                    {selected.has(item.code) && <Check size={14} className="bulk-check" aria-hidden="true" />}
                   </label>
                 </li>
               ))}

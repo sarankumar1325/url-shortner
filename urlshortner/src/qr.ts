@@ -1,7 +1,17 @@
 import { create, type QRCodeErrorCorrectionLevel } from 'qrcode'
 
-export type ModuleStyle = 'square' | 'rounded' | 'dots'
-export type EyeStyle = 'square' | 'rounded'
+export type ModuleStyle =
+  | 'square'
+  | 'rounded'
+  | 'dots'
+  | 'diamond'
+  | 'bars'
+  | 'dither'
+  | 'halftone'
+  | 'ascii'
+export type EyeStyle = 'square' | 'rounded' | 'circle'
+export type QrFont = 'sans' | 'serif' | 'mono' | 'rounded' | 'display'
+export type AsciiCharset = 'symbols' | 'binary' | 'link'
 export type CenterMark =
   | { kind: 'none' }
   | { kind: 'text'; text: string }
@@ -15,7 +25,11 @@ export type QrDesign = {
   eyeStyle: EyeStyle
   errorCorrection: QRCodeErrorCorrectionLevel
   center: CenterMark
+  font: QrFont
+  asciiCharset: AsciiCharset
 }
+
+export type Glyph = { x: number; y: number; char: string }
 
 export type QrGeometry = {
   /** Modules per side, excluding the quiet zone. */
@@ -24,8 +38,12 @@ export type QrGeometry = {
   extent: number
   /** Dark modules and finder patterns as one SVG path in module units. */
   path: string
+  /** Characters drawn instead of shapes for the ASCII style, centered on each module. */
+  glyphs: Glyph[]
   /** Center cut-out in module units, or null without a center mark. */
   center: { x: number; y: number; size: number } | null
+  /** Raw module matrix without the quiet zone; true is dark. */
+  modules: boolean[][]
 }
 
 export const DEFAULT_DESIGN: QrDesign = {
@@ -36,10 +54,71 @@ export const DEFAULT_DESIGN: QrDesign = {
   eyeStyle: 'square',
   errorCorrection: 'M',
   center: { kind: 'none' },
+  font: 'sans',
+  asciiCharset: 'symbols',
+}
+
+export const MODULE_STYLES: { value: ModuleStyle; label: string; artistic: boolean }[] = [
+  { value: 'square', label: 'Square', artistic: false },
+  { value: 'rounded', label: 'Rounded', artistic: false },
+  { value: 'dots', label: 'Dots', artistic: false },
+  { value: 'bars', label: 'Bars', artistic: false },
+  { value: 'diamond', label: 'Diamond', artistic: true },
+  { value: 'dither', label: 'Dither', artistic: true },
+  { value: 'halftone', label: 'Halftone', artistic: true },
+  { value: 'ascii', label: 'ASCII', artistic: true },
+]
+
+export const FONTS: { value: QrFont; label: string; stack: string; weight: number }[] = [
+  {
+    value: 'sans',
+    label: 'Sans',
+    stack: "'Instrument Sans Variable', 'Instrument Sans', Helvetica, Arial, sans-serif",
+    weight: 700,
+  },
+  {
+    value: 'serif',
+    label: 'Serif',
+    stack: "'Instrument Serif', Georgia, 'Times New Roman', serif",
+    weight: 400,
+  },
+  { value: 'mono', label: 'Mono', stack: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace", weight: 700 },
+  {
+    value: 'rounded',
+    label: 'Rounded',
+    stack: "ui-rounded, 'SF Pro Rounded', 'Arial Rounded MT Bold', Nunito, sans-serif",
+    weight: 700,
+  },
+  {
+    value: 'display',
+    label: 'Display',
+    stack: "Impact, Haettenschweiler, 'Arial Narrow Bold', 'Franklin Gothic Bold', sans-serif",
+    weight: 400,
+  },
+]
+
+export const ASCII_CHARSETS: { value: AsciiCharset; label: string }[] = [
+  { value: 'symbols', label: '#@%&' },
+  { value: 'binary', label: '0 1' },
+  { value: 'link', label: 'Link code' },
+]
+
+export function fontFor(font: QrFont): { stack: string; weight: number } {
+  return FONTS.find((item) => item.value === font) ?? FONTS[0]
+}
+
+export function isArtistic(style: ModuleStyle): boolean {
+  return MODULE_STYLES.find((item) => item.value === style)?.artistic ?? false
 }
 
 export const MAX_CENTER_TEXT = 6
 const CENTER_RATIO = 0.22
+// Dispersed ordering for a 3×3 ordered dither; lower cells fill first.
+const DITHER = [
+  [0, 7, 3],
+  [6, 4, 2],
+  [1, 5, 8],
+]
 
 const n = (value: number) => Number(value.toFixed(3))
 
@@ -62,6 +141,10 @@ function circle(cx: number, cy: number, r: number): string {
   return `M${n(cx - r)} ${n(cy)}a${n(r)} ${n(r)} 0 1 0 ${n(2 * r)} 0a${n(r)} ${n(r)} 0 1 0 ${n(-2 * r)} 0Z`
 }
 
+function diamond(x: number, y: number): string {
+  return `M${n(x + 0.5)} ${n(y - 0.02)}l0.52 0.52l-0.52 0.52l-0.52 -0.52Z`
+}
+
 /** True for modules inside one of the three 7×7 finder patterns. */
 export function isFinder(row: number, col: number, count: number): boolean {
   const inBand = (value: number, start: number) => value >= start && value < start + 7
@@ -73,7 +156,10 @@ export function isFinder(row: number, col: number, count: number): boolean {
 }
 
 function finder(x: number, y: number, style: EyeStyle): string {
-  // Even-odd fill: outer square, a hole, then the center square inside it.
+  // Even-odd fill: outer shape, a hole, then the center inside it.
+  if (style === 'circle') {
+    return circle(x + 3.5, y + 3.5, 3.5) + circle(x + 3.5, y + 3.5, 2.5) + circle(x + 3.5, y + 3.5, 1.5)
+  }
   if (style === 'rounded') {
     return roundRect(x, y, 7, 7, 2) + roundRect(x + 1, y + 1, 5, 5, 1.4) + roundRect(x + 2, y + 2, 3, 3, 0.9)
   }
@@ -81,8 +167,17 @@ function finder(x: number, y: number, style: EyeStyle): string {
 }
 
 export function effectiveErrorCorrection(design: QrDesign): QRCodeErrorCorrectionLevel {
-  // A center mark hides modules; level H restores up to 30% of the code.
-  return design.center.kind === 'none' ? design.errorCorrection : 'H'
+  // A center mark hides modules and artistic styles shrink them; level H recovers up to 30%.
+  return design.center.kind === 'none' && !isArtistic(design.moduleStyle) ? design.errorCorrection : 'H'
+}
+
+export function asciiCharacters(charset: AsciiCharset, text: string): string {
+  if (charset === 'binary') return '01'
+  if (charset === 'link') {
+    const code = text.split(/[/?#]/).filter(Boolean).at(-1)?.replace(/[^0-9a-z]/gi, '') ?? ''
+    return code || '#'
+  }
+  return '#@%&'
 }
 
 export function qrGeometry(text: string, design: QrDesign): QrGeometry {
@@ -90,6 +185,9 @@ export function qrGeometry(text: string, design: QrDesign): QrGeometry {
   const count = qr.modules.size
   const margin = Math.max(0, Math.round(design.margin))
   const extent = count + margin * 2
+  const modules = Array.from({ length: count }, (_, row) =>
+    Array.from({ length: count }, (_, col) => qr.modules.get(row, col) === 1),
+  )
 
   let center: QrGeometry['center'] = null
   let hidden = (_row: number, _col: number) => false
@@ -98,33 +196,71 @@ export function qrGeometry(text: string, design: QrDesign): QrGeometry {
     if (size % 2 !== count % 2) size += 1
     const start = (count - size) / 2
     center = { x: margin + start, y: margin + start, size }
-    hidden = (row, col) =>
-      row >= start && row < start + size && col >= start && col < start + size
+    hidden = (row, col) => row >= start && row < start + size && col >= start && col < start + size
   }
+  const dark = (row: number, col: number) =>
+    row >= 0 &&
+    col >= 0 &&
+    row < count &&
+    col < count &&
+    modules[row][col] &&
+    !isFinder(row, col, count) &&
+    !hidden(row, col)
 
+  const style = design.moduleStyle
   const parts: string[] = []
-  for (let row = 0; row < count; row += 1) {
-    let runStart = -1
-    for (let col = 0; col <= count; col += 1) {
-      const dark =
-        col < count &&
-        qr.modules.get(row, col) === 1 &&
-        !isFinder(row, col, count) &&
-        !hidden(row, col)
-      const x = margin + col
-      const y = margin + row
-      if (design.moduleStyle === 'square') {
-        if (dark && runStart < 0) runStart = col
-        if (!dark && runStart >= 0) {
-          parts.push(rect(margin + runStart, y, col - runStart, 1))
-          runStart = -1
+  const glyphs: Glyph[] = []
+  const chars = style === 'ascii' ? asciiCharacters(design.asciiCharset, text) : ''
+  const mid = (count - 1) / 2
+  const maxDistance = Math.hypot(mid, mid) || 1
+
+  if (style === 'bars') {
+    for (let col = 0; col < count; col += 1) {
+      let start = -1
+      for (let row = 0; row <= count; row += 1) {
+        const on = row < count && dark(row, col)
+        if (on && start < 0) start = row
+        if (!on && start >= 0) {
+          parts.push(roundRect(margin + col + 0.1, margin + start + 0.06, 0.8, row - start - 0.12, 0.4))
+          start = -1
         }
-      } else if (dark) {
-        parts.push(
-          design.moduleStyle === 'dots'
-            ? circle(x + 0.5, y + 0.5, 0.46)
-            : roundRect(x + 0.04, y + 0.04, 0.92, 0.92, 0.32),
-        )
+      }
+    }
+  } else {
+    let glyphIndex = 0
+    for (let row = 0; row < count; row += 1) {
+      let runStart = -1
+      for (let col = 0; col <= count; col += 1) {
+        const on = col < count && dark(row, col)
+        const x = margin + col
+        const y = margin + row
+        if (style === 'square') {
+          if (on && runStart < 0) runStart = col
+          if (!on && runStart >= 0) {
+            parts.push(rect(margin + runStart, y, col - runStart, 1))
+            runStart = -1
+          }
+          continue
+        }
+        if (!on) continue
+        if (style === 'rounded') parts.push(roundRect(x + 0.04, y + 0.04, 0.92, 0.92, 0.32))
+        else if (style === 'dots') parts.push(circle(x + 0.5, y + 0.5, 0.46))
+        else if (style === 'diamond') parts.push(diamond(x, y))
+        else if (style === 'halftone') {
+          const distance = Math.hypot(row - mid, col - mid) / maxDistance
+          parts.push(circle(x + 0.5, y + 0.5, 0.5 * (1 - 0.34 * distance)))
+        } else if (style === 'dither') {
+          // Density falls along the diagonal for a dithered gradient; never below 5 of 9 cells.
+          const level = Math.round(9 - 4 * ((row + col) / (2 * (count - 1) || 1)))
+          for (let i = 0; i < 3; i += 1) {
+            for (let j = 0; j < 3; j += 1) {
+              if (DITHER[i][j] < level) parts.push(rect(x + j / 3, y + i / 3, 1 / 3, 1 / 3))
+            }
+          }
+        } else if (style === 'ascii') {
+          glyphs.push({ x: x + 0.5, y: y + 0.5, char: chars[(row * 7 + col * 13 + glyphIndex) % chars.length] })
+          glyphIndex += 1
+        }
       }
     }
   }
@@ -135,7 +271,7 @@ export function qrGeometry(text: string, design: QrDesign): QrGeometry {
   ]) {
     parts.push(finder(margin + col, margin + row, design.eyeStyle))
   }
-  return { count, extent, path: parts.join(''), center }
+  return { count, extent, path: parts.join(''), glyphs, center, modules }
 }
 
 function escapeXml(value: string): string {
@@ -150,32 +286,57 @@ export function centerFontSize(boxSize: number, text: string): number {
   return Math.min(boxSize * 0.46, (boxSize * 1.5) / Math.max(1, text.length))
 }
 
+export const GLYPH_SIZE = 1.18
+
 export function qrSvg(text: string, design: QrDesign, pixels: number): string {
   const geometry = qrGeometry(text, design)
-  const { extent, path, center } = geometry
+  const { extent, path, center, glyphs } = geometry
   const fg = escapeXml(design.foreground)
   const bg = escapeXml(design.background)
-  const crisp = design.moduleStyle === 'square' && design.eyeStyle === 'square'
-  let mark = ''
+  const font = fontFor(design.font)
+  const family = escapeXml(font.stack)
+  const crisp =
+    (design.moduleStyle === 'square' || design.moduleStyle === 'dither') && design.eyeStyle === 'square'
+  let body = `<path d="${path}" fill="${fg}" fill-rule="evenodd"/>`
+  if (glyphs.length) {
+    body +=
+      `<g fill="${fg}" font-family="${family}" font-weight="800" font-size="${GLYPH_SIZE}" text-anchor="middle" dominant-baseline="central">` +
+      glyphs.map((g) => `<text x="${n(g.x)}" y="${n(g.y)}">${escapeXml(g.char)}</text>`).join('') +
+      `</g>`
+  }
   if (center) {
     const pad = 0.35
-    mark += `<rect x="${n(center.x + pad)}" y="${n(center.y + pad)}" width="${n(center.size - pad * 2)}" height="${n(center.size - pad * 2)}" rx="${n(center.size * 0.18)}" fill="${bg}"/>`
+    body += `<rect x="${n(center.x + pad)}" y="${n(center.y + pad)}" width="${n(center.size - pad * 2)}" height="${n(center.size - pad * 2)}" rx="${n(center.size * 0.18)}" fill="${bg}"/>`
     if (design.center.kind === 'text') {
       const label = design.center.text.slice(0, MAX_CENTER_TEXT)
       const size = centerFontSize(center.size, label)
-      mark += `<text x="${n(center.x + center.size / 2)}" y="${n(center.y + center.size / 2)}" fill="${fg}" font-family="Inter, Helvetica, Arial, sans-serif" font-weight="700" font-size="${n(size)}" text-anchor="middle" dominant-baseline="central">${escapeXml(label)}</text>`
+      body += `<text x="${n(center.x + center.size / 2)}" y="${n(center.y + center.size / 2)}" fill="${fg}" font-family="${family}" font-weight="${font.weight}" font-size="${n(size)}" text-anchor="middle" dominant-baseline="central">${escapeXml(label)}</text>`
     } else if (design.center.kind === 'logo') {
       const inset = center.size * 0.16
-      mark += `<image href="${escapeXml(design.center.dataUrl)}" x="${n(center.x + inset)}" y="${n(center.y + inset)}" width="${n(center.size - inset * 2)}" height="${n(center.size - inset * 2)}" preserveAspectRatio="xMidYMid meet"/>`
+      body += `<image href="${escapeXml(design.center.dataUrl)}" x="${n(center.x + inset)}" y="${n(center.y + inset)}" width="${n(center.size - inset * 2)}" height="${n(center.size - inset * 2)}" preserveAspectRatio="xMidYMid meet"/>`
     }
   }
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${extent} ${extent}" width="${pixels}" height="${pixels}"${crisp ? ' shape-rendering="crispEdges"' : ''}>` +
     `<rect width="${extent}" height="${extent}" fill="${bg}"/>` +
-    `<path d="${path}" fill="${fg}" fill-rule="evenodd"/>` +
-    mark +
+    body +
     `</svg>`
   )
+}
+
+/** The code as text art: two block characters per dark module so cells stay square. */
+export function qrText(text: string, design: QrDesign): string {
+  const { modules } = qrGeometry(text, { ...design, center: { kind: 'none' } })
+  const margin = Math.max(0, Math.round(design.margin))
+  const width = modules.length + margin * 2
+  const blank = '  '.repeat(width)
+  const lines: string[] = []
+  for (let i = 0; i < margin; i += 1) lines.push(blank)
+  for (const row of modules) {
+    lines.push('  '.repeat(margin) + row.map((on) => (on ? '██' : '  ')).join('') + '  '.repeat(margin))
+  }
+  for (let i = 0; i < margin; i += 1) lines.push(blank)
+  return lines.map((line) => line.replace(/\s+$/, '')).join('\n') + '\n'
 }
 
 function channel(value: number): number {
@@ -232,11 +393,36 @@ export function scanWarnings(design: QrDesign): ScanWarning[] {
       message: 'A quiet zone under 2 modules can fail when the code sits near other artwork.',
     })
   }
+  if (isArtistic(design.moduleStyle)) {
+    warnings.push({
+      level: 'warning',
+      message: 'Artistic styles cover less of each module. Error correction is raised to H; test-scan a print before you ship it.',
+    })
+  }
   return warnings
 }
 
+export type QrFormat = 'png' | 'jpeg' | 'webp' | 'svg' | 'pdf' | 'txt'
+
+export const FORMATS: { value: QrFormat; label: string; mime: string; extension: string }[] = [
+  { value: 'png', label: 'PNG', mime: 'image/png', extension: 'png' },
+  { value: 'jpeg', label: 'JPEG', mime: 'image/jpeg', extension: 'jpg' },
+  { value: 'webp', label: 'WebP', mime: 'image/webp', extension: 'webp' },
+  { value: 'svg', label: 'SVG', mime: 'image/svg+xml', extension: 'svg' },
+  { value: 'pdf', label: 'PDF', mime: 'application/pdf', extension: 'pdf' },
+  { value: 'txt', label: 'Text', mime: 'text/plain;charset=utf-8', extension: 'txt' },
+]
+
+export function formatInfo(format: QrFormat) {
+  return FORMATS.find((item) => item.value === format) ?? FORMATS[0]
+}
+
+export function qrExportName(code: string, format: QrFormat): string {
+  return `shortly-${code}.${formatInfo(format).extension}`
+}
+
 export function qrSvgFileName(code: string): string {
-  return `shortly-${code}.svg`
+  return qrExportName(code, 'svg')
 }
 
 export function zipFileName(now = new Date()): string {
@@ -260,7 +446,6 @@ export function crc32(data: Uint8Array): number {
   }
   return (crc ^ 0xffffffff) >>> 0
 }
-
 /** Minimal store-only ZIP; PNG and SVG payloads gain little from deflate. */
 export function zipFiles(
   files: { name: string; data: Uint8Array }[],
