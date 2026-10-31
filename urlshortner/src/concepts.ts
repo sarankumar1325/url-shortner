@@ -1,3 +1,5 @@
+import type { RateLimitConfig, SystemConfig } from './api'
+
 export type ConceptCategory =
   | 'Performance'
   | 'Reliability'
@@ -39,7 +41,7 @@ export const CONCEPTS: Concept[] = [
     title: 'Cache-aside redirect cache',
     category: 'Performance',
     summary: 'Hot redirects are answered from Redis without touching Postgres.',
-    how: 'On a miss the API loads the link from Postgres and writes a small JSON entry with a 60 second TTL. Only live links are cached, and edits or deletes invalidate the key.',
+    how: 'On a miss the API loads the link from Postgres and writes a small JSON entry with a {cache_ttl} second TTL. Only live links are cached, and edits or deletes invalidate the key.',
     tradeoff: 'A change made from another instance can take up to one TTL to land everywhere.',
     code: ['backend/src/backend/api/routes/redirect.py'],
     live: 'redirect-cache',
@@ -70,16 +72,16 @@ export const CONCEPTS: Concept[] = [
     category: 'Performance',
     summary: 'Analytics read one row per link per day instead of scanning every click.',
     how: 'Ingestion upserts click_daily counters keyed by (url_id, day) in a consistent order, so concurrent drains never deadlock.',
-    tradeoff: 'Breakdowns finer than a day need the raw clicks table, which is kept for 90 days.',
+    tradeoff: 'Breakdowns finer than a day need the raw clicks table, which is kept for {raw_days} days.',
     code: ['backend/src/backend/services/analytics.py', 'backend/src/backend/models.py'],
   },
   {
     id: 'leaderboard',
     title: 'Cached top-links leaderboard',
     category: 'Performance',
-    summary: 'The “top links” ranking is computed once per minute per workspace.',
-    how: 'The aggregate over daily rollups is cached in Redis under a workspace-scoped key with a 60 second TTL, behind single-flight so a cold cache costs one query.',
-    tradeoff: 'Rankings can lag by up to a minute plus whatever is still queued in the stream.',
+    summary: 'The “top links” ranking is computed at most once every {leaderboard_ttl} seconds per workspace.',
+    how: 'The aggregate over daily rollups is cached in Redis under a workspace-scoped key with a {leaderboard_ttl} second TTL, behind single-flight so a cold cache costs one query.',
+    tradeoff: 'Rankings can lag by up to {leaderboard_ttl} seconds plus whatever is still queued in the stream.',
     code: ['backend/src/backend/services/leaderboard.py'],
     live: 'leaderboard',
   },
@@ -87,8 +89,8 @@ export const CONCEPTS: Concept[] = [
     id: 'short-codes',
     title: 'Random base62 codes with collision retry',
     category: 'Performance',
-    summary: 'Five random base62 characters give about 916 million codes with no coordination.',
-    how: 'Codes come from a CSPRNG. A unique index catches the rare collision and creation retries with a fresh code, up to five times.',
+    summary: '{code_length} random base{code_alphabet} characters give about {code_space} codes with no coordination.',
+    how: 'Codes come from a CSPRNG. A unique index catches the rare collision and creation retries with a fresh code, up to {code_retries} times.',
     tradeoff: 'Random codes are not sequential, so they cannot be guessed but also cannot be ordered.',
     code: ['backend/src/backend/core/security.py', 'docs/adr/0003-short-code-strategy.md'],
   },
@@ -97,7 +99,7 @@ export const CONCEPTS: Concept[] = [
     title: 'Circuit breaker on Redis',
     category: 'Reliability',
     summary: 'When Redis is down, calls fail in microseconds instead of waiting out timeouts.',
-    how: 'Five consecutive transport failures open the circuit for 15 seconds. Then a single trial call is allowed: success closes it, failure reopens it. Command errors do not count, because Redis answered.',
+    how: '{breaker_threshold} consecutive transport failures open the circuit for {breaker_reset} seconds. Then a single trial call is allowed: success closes it, failure reopens it. Command errors do not count, because Redis answered.',
     tradeoff: 'While open, caching and rate limiting are skipped or fail closed until the trial succeeds.',
     code: ['backend/src/backend/core/breaker.py', 'backend/src/backend/core/redis.py'],
     live: 'breaker',
@@ -107,7 +109,7 @@ export const CONCEPTS: Concept[] = [
     title: 'Fail-open and fail-closed rate limits',
     category: 'Reliability',
     summary: 'Redirects keep working when the limiter is down; sign-ins do not.',
-    how: 'A fixed-window counter uses INCR and EXPIRE NX in one pipeline. Each call site chooses what happens when Redis is unreachable.',
+    how: 'A fixed-window counter uses INCR and EXPIRE NX in one pipeline. Each call site chooses what happens when Redis is unreachable; redirects allow {redirect_limit} per IP.',
     tradeoff: 'Fixed windows allow short bursts at window edges in exchange for one round trip.',
     code: ['backend/src/backend/services/ratelimit.py'],
     live: 'rate-limits',
@@ -117,7 +119,7 @@ export const CONCEPTS: Concept[] = [
     title: 'Durable stream consumer group',
     category: 'Reliability',
     summary: 'A crash mid-batch never loses or double-counts clicks.',
-    how: 'Events are read with XREADGROUP and acknowledged only after the Postgres transaction commits. Stale pending messages are reclaimed with XAUTOCLAIM, and repeated failures go to a dead-letter stream.',
+    how: 'Events are read with XREADGROUP and acknowledged only after the Postgres transaction commits. Stale pending messages are reclaimed with XAUTOCLAIM, and events that fail {max_attempts} times go to a dead-letter stream.',
     tradeoff: 'At-least-once delivery means persistence must be idempotent, which the event-id dedupe provides.',
     code: ['backend/src/backend/services/analytics.py', 'docs/adr/0004-async-analytics.md'],
     live: 'stream',
@@ -128,7 +130,7 @@ export const CONCEPTS: Concept[] = [
     category: 'Reliability',
     summary: 'Retrying a create request returns the original link instead of making a second one.',
     how: 'Each create carries an Idempotency-Key. The first response is stored encrypted, and a retry with the same key and body replays it. A different body with the same key is rejected.',
-    tradeoff: 'Replays are kept for 24 hours, so very late retries create new links.',
+    tradeoff: 'Replays are kept for {replay_hours} hours, so very late retries create new links.',
     code: ['backend/src/backend/services/links.py'],
   },
   {
@@ -145,7 +147,7 @@ export const CONCEPTS: Concept[] = [
     title: 'Drain on read',
     category: 'Reliability',
     summary: 'Charts stay fresh even though the free hosting plan only allows a daily cron.',
-    how: 'Opening analytics drains a bounded batch of queued events first, so the reader pays a small, capped cost for fresh data.',
+    how: 'Opening analytics drains up to {read_drain_limit} queued events first, so the reader pays a small, capped cost for fresh data.',
     tradeoff: 'The first analytics view after a busy period is a little slower.',
     code: ['backend/src/backend/api/routes/links.py'],
   },
@@ -181,9 +183,9 @@ export const CONCEPTS: Concept[] = [
     id: 'retention',
     title: 'Tiered retention',
     category: 'Data',
-    summary: 'Raw clicks are kept for 90 days; daily rollups for two years.',
-    how: 'A scheduled cleanup deletes expired rows in batches of 1,000 so it never holds long locks.',
-    tradeoff: 'Per-click detail older than 90 days is gone for good.',
+    summary: 'Raw clicks are kept for {raw_days} days; daily rollups for {rollup_days} days.',
+    how: 'A scheduled cleanup deletes expired rows in batches of {cleanup_batch} so it never holds long locks.',
+    tradeoff: 'Per-click detail older than {raw_days} days is gone for good.',
     code: ['backend/src/backend/services/analytics.py'],
   },
   {
@@ -254,7 +256,7 @@ export const CONCEPTS: Concept[] = [
     title: 'Live alias availability',
     category: 'Product safety',
     summary: 'You learn an alias is taken while typing, not after submitting.',
-    how: 'The server checks syntax and reserved words first, then probes the redirect cache, and only then does one indexed Postgres lookup. Checks are rate limited per IP.',
+    how: 'The server checks syntax and reserved words first, then probes the redirect cache, and only then does one indexed Postgres lookup. Checks are limited to {alias_limit} per IP.',
     tradeoff: 'The answer can change between the check and the create, so creation still enforces uniqueness.',
     code: ['backend/src/backend/services/links.py'],
   },
@@ -269,21 +271,80 @@ export const CONCEPTS: Concept[] = [
   },
 ]
 
+export type ConceptValues = Record<string, string>
+
+const NUMBER = new Intl.NumberFormat('en-US')
+
+export function humanCount(value: number): string {
+  if (value >= 1e9) return `${Number((value / 1e9).toFixed(1))} billion`
+  if (value >= 1e6) return `${Math.round(value / 1e6)} million`
+  return NUMBER.format(value)
+}
+
+export function formatWindow(seconds: number): string {
+  if (seconds % 3600 === 0) return seconds === 3600 ? 'hour' : `${seconds / 3600} hours`
+  if (seconds % 60 === 0) return seconds === 60 ? 'minute' : `${seconds / 60} minutes`
+  return `${seconds} seconds`
+}
+
+/** Placeholder values for the catalog, all read from the running API. */
+export function conceptValues(config: SystemConfig): ConceptValues {
+  const redirect = config.rate_limits.find((limit) => limit.name === 'Redirects')
+  const alias = config.rate_limits.find((limit) => limit.name === 'Alias checks')
+  const per = (limit?: RateLimitConfig) =>
+    limit ? `${NUMBER.format(limit.limit)} per ${formatWindow(limit.window_seconds)}` : ''
+  return {
+    cache_ttl: String(config.redirect_cache_seconds),
+    leaderboard_ttl: String(config.leaderboard_cache_seconds),
+    code_length: String(config.short_codes.length),
+    code_alphabet: String(config.short_codes.alphabet),
+    code_space: humanCount(config.short_codes.space),
+    code_retries: String(config.short_codes.retry_limit),
+    breaker_threshold: String(config.breaker.failure_threshold),
+    breaker_reset: String(config.breaker.reset_after_seconds),
+    redirect_limit: per(redirect),
+    alias_limit: per(alias),
+    max_attempts: String(config.analytics.max_attempts),
+    replay_hours: String(Math.round(config.replay_ttl_seconds / 3600)),
+    read_drain_limit: NUMBER.format(config.analytics.read_drain_limit),
+    raw_days: String(config.retention.raw_click_days),
+    rollup_days: NUMBER.format(config.retention.daily_rollup_days),
+    cleanup_batch: NUMBER.format(config.retention.cleanup_batch),
+  }
+}
+
+/** Replaces {token} placeholders; unknown tokens show an ellipsis until config loads. */
+export function fillTemplate(text: string, values: ConceptValues): string {
+  return text.replace(/\{([a-z_]+)\}/g, (_, key: string) => values[key] || '…')
+}
+
+export function renderConcept(concept: Concept, values: ConceptValues): Concept {
+  return {
+    ...concept,
+    summary: fillTemplate(concept.summary, values),
+    how: fillTemplate(concept.how, values),
+    tradeoff: fillTemplate(concept.tradeoff, values),
+  }
+}
+
 export function filterConcepts(
   concepts: Concept[],
   category: ConceptCategory | 'All',
   query: string,
+  values: ConceptValues = {},
 ): Concept[] {
   const needle = query.trim().toLowerCase()
-  return concepts.filter(
-    (concept) =>
-      (category === 'All' || concept.category === category) &&
-      (!needle ||
-        [concept.title, concept.summary, concept.how, concept.tradeoff]
-          .join(' ')
-          .toLowerCase()
-          .includes(needle)),
-  )
+  return concepts
+    .map((concept) => renderConcept(concept, values))
+    .filter(
+      (concept) =>
+        (category === 'All' || concept.category === category) &&
+        (!needle ||
+          [concept.title, concept.summary, concept.how, concept.tradeoff]
+            .join(' ')
+            .toLowerCase()
+            .includes(needle)),
+    )
 }
 
 export function formatRatio(ratio: number | null): string {

@@ -1,6 +1,39 @@
 import { describe, expect, test } from 'bun:test'
 import { aliasCheckable } from '../src/aliasAvailability'
-import { CATEGORIES, CONCEPTS, filterConcepts, formatRatio, formatUptime } from '../src/concepts'
+import type { SystemConfig } from '../src/api'
+import {
+  CATEGORIES,
+  CONCEPTS,
+  conceptValues,
+  fillTemplate,
+  filterConcepts,
+  formatRatio,
+  formatUptime,
+  formatWindow,
+  humanCount,
+} from '../src/concepts'
+
+const CONFIG: SystemConfig = {
+  short_codes: { length: 5, alphabet: 62, space: 916_132_832, retry_limit: 5 },
+  rate_limits: [
+    { name: 'Redirects', limit: 600, window_seconds: 60, scope: 'ip', fail_open: true },
+    { name: 'Alias checks', limit: 120, window_seconds: 3600, scope: 'user', fail_open: true },
+  ],
+  redirect_cache_seconds: 300,
+  leaderboard_cache_seconds: 30,
+  breaker: { failure_threshold: 3, reset_after_seconds: 10 },
+  analytics: {
+    drain_batch: 100,
+    max_events_per_drain: 1000,
+    read_drain_limit: 500,
+    drain_on_read: true,
+    claim_min_idle_seconds: 60,
+    max_attempts: 5,
+  },
+  retention: { raw_click_days: 90, daily_rollup_days: 730, cleanup_batch: 5000 },
+  replay_ttl_seconds: 86_400,
+  session_ttl_seconds: 1_209_600,
+}
 import { readSidebarCollapsed, writeSidebarCollapsed } from '../src/layout'
 
 describe('alias availability', () => {
@@ -33,6 +66,35 @@ describe('concept catalog', () => {
     expect(reliability.every((concept) => concept.category === 'Reliability')).toBe(true)
     expect(filterConcepts(CONCEPTS, 'All', 'stampede').map((concept) => concept.id)).toContain('single-flight')
     expect(filterConcepts(CONCEPTS, 'Security', 'stampede')).toEqual([])
+  })
+
+  test('every placeholder is filled from the live config', () => {
+    const values = conceptValues(CONFIG)
+    for (const concept of CONCEPTS) {
+      for (const text of [concept.summary, concept.how, concept.tradeoff]) {
+        for (const [, key] of text.matchAll(/\{([a-z_]+)\}/g)) expect(values[key]).toBeTruthy()
+      }
+    }
+    expect(values.redirect_limit).toBe('600 per minute')
+    expect(values.alias_limit).toBe('120 per hour')
+    expect(values.code_space).toBe('916 million')
+    expect(fillTemplate('{cache_ttl}s and {missing}', values)).toBe('300s and …')
+  })
+
+  test('searches the filled text', () => {
+    const values = conceptValues(CONFIG)
+    const matches = filterConcepts(CONCEPTS, 'All', '300 second', values)
+    expect(matches.length).toBeGreaterThan(0)
+    expect(matches.every((concept) => !concept.how.includes('{'))).toBe(true)
+  })
+
+  test('formats counts and windows', () => {
+    expect(humanCount(916_132_832)).toBe('916 million')
+    expect(humanCount(56_800_235_584)).toBe('56.8 billion')
+    expect(humanCount(4200)).toBe('4,200')
+    expect(formatWindow(60)).toBe('minute')
+    expect(formatWindow(7200)).toBe('2 hours')
+    expect(formatWindow(45)).toBe('45 seconds')
   })
 
   test('formats live numbers', () => {

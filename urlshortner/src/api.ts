@@ -714,8 +714,135 @@ export type SystemStatus = {
     dead_letter_depth: number | null
     generated_at: string
   }
+  config: SystemConfig
 }
 
 export function getSystemStatus(signal: AbortSignal): Promise<SystemStatus> {
   return request<SystemStatus>('/api/v1/system/status', { signal })
+}
+
+export type RateLimitConfig = {
+  name: string
+  limit: number
+  window_seconds: number
+  scope: string
+  fail_open: boolean
+}
+
+export type SystemConfig = {
+  short_codes: { length: number; alphabet: number; space: number; retry_limit: number }
+  rate_limits: RateLimitConfig[]
+  redirect_cache_seconds: number
+  leaderboard_cache_seconds: number
+  breaker: { failure_threshold: number; reset_after_seconds: number }
+  analytics: {
+    drain_batch: number
+    max_events_per_drain: number
+    read_drain_limit: number
+    drain_on_read: boolean
+    claim_min_idle_seconds: number
+    max_attempts: number
+  }
+  retention: { raw_click_days: number; daily_rollup_days: number; cleanup_batch: number }
+  replay_ttl_seconds: number
+  session_ttl_seconds: number
+}
+
+export type TraceStep = {
+  step:
+    | 'rate_limit'
+    | 'evict'
+    | 'cache'
+    | 'single_flight'
+    | 'postgres'
+    | 'cache_fill'
+    | 'expiry'
+    | 'visit_guard'
+    | 'enqueue'
+  label: string
+  ms: number
+  outcome: string
+  detail: string
+}
+
+export type RedirectTrace = {
+  code: string
+  cold: boolean
+  steps: TraceStep[]
+  total_ms: number
+  response: { status: number; location: string | null; reason: string | null }
+  breaker_state: 'closed' | 'open' | 'half_open'
+  traced_at: string
+}
+
+export function traceRedirect(
+  code: string,
+  cold: boolean,
+  workspaceId: string,
+  signal: AbortSignal,
+): Promise<RedirectTrace> {
+  return request<RedirectTrace>('/api/v1/system/trace', {
+    method: 'POST',
+    body: { code, cold },
+    access: { workspaceId },
+    signal,
+  })
+}
+
+export type DashboardStatus = 'active' | 'paused' | 'expired' | 'used_up' | 'blocked'
+export type DashboardIssue =
+  | DashboardStatus
+  | 'serving_fallback'
+  | 'expiring_soon'
+  | 'near_limit'
+  | 'no_recent_clicks'
+
+export type DashboardLink = {
+  short_code: string
+  short_url: string
+  long_url: string
+  status: DashboardStatus
+  issues: DashboardIssue[]
+  clicks: number
+  previous_clicks: number
+  change: number | null
+  last_click_at: string | null
+  created_at: string | null
+  expires_at: string | null
+  max_clicks: number | null
+  clicks_used: number
+  fallback_url: string | null
+}
+
+export type Dashboard = {
+  days: number
+  from: string
+  to: string
+  totals: {
+    clicks: number
+    human_clicks: number
+    bot_clicks: number
+    previous_clicks: number
+    change: number | null
+  }
+  series: DailyPoint[]
+  breakdowns: Analytics['breakdowns']
+  status_counts: Record<DashboardStatus, number> & { total: number }
+  issue_counts: Partial<Record<DashboardIssue, number>>
+  links: DashboardLink[]
+  links_truncated: boolean
+  freshness: IngestionFreshness
+  thresholds: { expiring_soon_days: number; near_limit_ratio: number; quiet_after_days: number }
+  generated_at: string
+}
+
+export function getDashboard(
+  workspaceId: string,
+  days: 7 | 30 | 90,
+  signal: AbortSignal,
+): Promise<Dashboard> {
+  return request<Dashboard>(`/api/v1/dashboard?days=${days}`, {
+    access: { workspaceId },
+    signal,
+  })
 }
