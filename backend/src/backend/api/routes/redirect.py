@@ -6,9 +6,11 @@ from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.deps import get_api_session
+from backend.core import metrics
 from backend.core.config import get_settings
 from backend.core.problems import APIError
 from backend.core.redis import RedisError, command
+from backend.core.singleflight import SingleFlight
 from backend.services import analytics as analytics_service
 from backend.services import links as links_service
 from backend.services import ratelimit, visitor_pages
@@ -16,6 +18,8 @@ from backend.services import ratelimit, visitor_pages
 router = APIRouter(tags=["redirects"])
 
 CACHE_PREFIX = "redir:"
+
+cache_fills = SingleFlight()
 
 
 def _client_ip(request: Request) -> str:
@@ -69,24 +73,33 @@ def _expired(entry: dict) -> bool:
     return bool(expires_at) and datetime.fromisoformat(expires_at) <= datetime.now(UTC)
 
 
+async def _load_entry(code: str, session: AsyncSession) -> dict:
+    url, state = await links_service.resolve_public(session, code)
+    entry = {
+        "url_id": url.id,
+        "long_url": url.long_url,
+        "expires_at": url.expires_at.isoformat() if url.expires_at else None,
+        "fallback_url": url.fallback_url,
+        "max_clicks": url.max_clicks,
+    }
+    if state != "expired":
+        await _cache_set(code, entry)
+    return entry
+
+
 async def resolve_redirect(code: str, session: AsyncSession) -> dict:
     """Positive cache of {url_id, long_url, expires_at, fallback_url, max_clicks}.
 
     Entries are only written for live links; mutations may take up to the
-    cache TTL to land. Visit limits are enforced separately against Postgres.
+    cache TTL to land. Concurrent misses for one code share a single Postgres
+    load. Visit limits are enforced separately against Postgres.
     """
     entry = await _cache_get(code)
-    if entry is None:
-        url, state = await links_service.resolve_public(session, code)
-        entry = {
-            "url_id": url.id,
-            "long_url": url.long_url,
-            "expires_at": url.expires_at.isoformat() if url.expires_at else None,
-            "fallback_url": url.fallback_url,
-            "max_clicks": url.max_clicks,
-        }
-        if state != "expired":
-            await _cache_set(code, entry)
+    if entry is not None:
+        metrics.incr("redirect.cache_hit")
+    else:
+        metrics.incr("redirect.cache_miss")
+        entry = await cache_fills.do(code, lambda: _load_entry(code, session))
     if _expired(entry):
         return fallback_or_gone(entry, "link_expired", "This link has expired.")
     return entry
