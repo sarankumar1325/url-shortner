@@ -18,6 +18,8 @@ from backend.services import ratelimit, visitor_pages
 router = APIRouter(tags=["redirects"])
 
 CACHE_PREFIX = "redir:"
+REDIRECT_LIMIT = 600
+REDIRECT_WINDOW_SECONDS = 60
 
 cache_fills = SingleFlight()
 
@@ -119,7 +121,10 @@ def _wants_html(request: Request) -> bool:
 
 async def _enforce_redirect_limit(request: Request) -> None:
     allowed, retry_after = await ratelimit.check_rate_limit(
-        f"redirect:{_client_ip(request)}", 600, fail_open=True
+        f"redirect:{_client_ip(request)}",
+        REDIRECT_LIMIT,
+        REDIRECT_WINDOW_SECONDS,
+        fail_open=True,
     )
     if not allowed:
         raise APIError(

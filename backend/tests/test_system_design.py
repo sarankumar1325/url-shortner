@@ -189,3 +189,7 @@ async def test_system_status_reports_mechanisms(monkeypatch) -> None:
     assert body["dependencies"]["postgres"]["ok"] is True
     assert body["circuit_breaker"]["state"] == "closed"
     assert body["redirect_cache"]["hit_ratio"] == 0.75
+    config = body["config"]
+    assert config["short_codes"]["space"] == 62**5
+    assert config["breaker"]["failure_threshold"] == 5
+    assert {limit["name"] for limit in config["rate_limits"]} >= {"Redirects", "Traces"}

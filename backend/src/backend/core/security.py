@@ -17,6 +17,7 @@ TOKEN_PREFIX = "shrm_"
 SESSION_PREFIX = "shrs_"
 INVITATION_PREFIX = "shri_"
 TOKEN_BYTES = 32  # 256-bit management token
+SHORT_CODE_LENGTH = 5
 
 _PASSWORDS = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4)
 _DUMMY_HASH = _PASSWORDS.hash("shortly-dummy-password")
@@ -41,7 +42,7 @@ def _replay_key() -> bytes:
     return _derive(b"idempotency-replay-aead-v1")
 
 
-def generate_short_code(length: int = 5) -> str:
+def generate_short_code(length: int = SHORT_CODE_LENGTH) -> str:
     return "".join(secrets.choice(BASE62) for _ in range(length))
 
 

@@ -22,6 +22,10 @@ class SingleFlight:
     def in_flight(self) -> int:
         return len(self._calls)
 
+    def joining(self, key: str) -> bool:
+        """True when a call for `key` is already running and would be shared."""
+        return key in self._calls
+
     async def do(self, key: str, fn: Callable[[], Awaitable[T]]) -> T:
         existing = self._calls.get(key)
         if existing is not None:

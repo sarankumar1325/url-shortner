@@ -26,6 +26,10 @@ from backend.services.workspaces import require_role
 
 router = APIRouter(prefix="/links", tags=["links"])
 
+CREATE_LIMIT_WORKSPACE = 60
+CREATE_LIMIT_ANONYMOUS = 20
+ALIAS_CHECK_LIMIT = 120
+
 
 def _iso(value: datetime | None) -> str | None:
     if value is None:
@@ -103,10 +107,10 @@ async def create_link(
     if context is not None:
         require_role(context.role, "member")
         limit_key = f"create-user:{context.workspace.id}"
-        limit = 60
+        limit = CREATE_LIMIT_WORKSPACE
     else:
         limit_key = f"create:{client_ip(request)}"
-        limit = 20
+        limit = CREATE_LIMIT_ANONYMOUS
     allowed, retry_after = await ratelimit.check_rate_limit(limit_key, limit)
     if not allowed:
         raise APIError(
@@ -164,7 +168,7 @@ async def alias_availability(
     session: AsyncSession = Depends(get_api_session),
 ) -> dict:
     allowed, retry_after = await ratelimit.check_rate_limit(
-        f"alias-check:{client_ip(request)}", 120, fail_open=True
+        f"alias-check:{client_ip(request)}", ALIAS_CHECK_LIMIT, fail_open=True
     )
     if not allowed:
         raise APIError(
