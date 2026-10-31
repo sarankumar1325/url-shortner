@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.config import get_settings
 from backend.core.problems import APIError
+from backend.core.redis import RedisError, command
 from backend.core.security import (
     decrypt_replay,
     encrypt_replay,
@@ -490,3 +491,46 @@ async def delete_link(session: AsyncSession, url: Url) -> None:
     url.deleted_at = _now()
     url.updated_at = _now()
     await session.commit()
+
+
+async def alias_availability(session: AsyncSession, alias: str) -> dict:
+    """Syntax and reserved-word checks first, then a cache probe, then Postgres.
+
+    Soft-deleted codes stay taken: short codes are never reissued, so an old
+    printed link can never start pointing somewhere new.
+    """
+    try:
+        validate_custom_alias(alias)
+    except APIError as exc:
+        reason = "reserved" if exc.code == "reserved_alias" else "invalid"
+        return {"alias": alias, "available": False, "reason": reason, "message": exc.detail}
+
+    try:
+        cached = await command("EXISTS", f"redir:{alias}")
+    except RedisError:
+        cached = 0
+    if cached:
+        return {
+            "alias": alias,
+            "available": False,
+            "reason": "taken",
+            "message": "That alias is already in use.",
+            "source": "cache",
+        }
+
+    result = await session.execute(select(Url.id).where(Url.short_code == alias).limit(1))
+    if result.scalar_one_or_none() is not None:
+        return {
+            "alias": alias,
+            "available": False,
+            "reason": "taken",
+            "message": "That alias is already in use.",
+            "source": "database",
+        }
+    return {
+        "alias": alias,
+        "available": True,
+        "reason": None,
+        "message": "That alias is available.",
+        "source": "database",
+    }

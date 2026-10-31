@@ -19,8 +19,8 @@ from backend.api.deps import (
 from backend.api.routes.redirect import invalidate_cache
 from backend.core.config import get_settings
 from backend.core.problems import APIError
+from backend.services import leaderboard, ratelimit
 from backend.services import links as links_service
-from backend.services import ratelimit
 from backend.services.validation import normalize_tag
 from backend.services.workspaces import require_role
 
@@ -155,6 +155,34 @@ async def list_links(
         "workspace_id": str(context.workspace.id),
         "role": context.role,
     }
+
+
+@router.get("/availability", summary="Check whether a custom alias is free")
+async def alias_availability(
+    request: Request,
+    alias: str = Query(min_length=1, max_length=64),
+    session: AsyncSession = Depends(get_api_session),
+) -> dict:
+    allowed, retry_after = await ratelimit.check_rate_limit(
+        f"alias-check:{client_ip(request)}", 120, fail_open=True
+    )
+    if not allowed:
+        raise APIError(
+            429, "rate_limited", "Too many requests.", headers={"Retry-After": str(retry_after)}
+        )
+    return await links_service.alias_availability(session, alias)
+
+
+@router.get("/top", summary="Most-clicked links in the active workspace (cached)")
+async def top_links(
+    days: int = Query(default=7),
+    limit: int = Query(default=5, ge=1, le=10),
+    session: AsyncSession = Depends(get_api_session),
+    context: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    if days not in leaderboard.ALLOWED_DAYS:
+        raise APIError(422, "validation_error", "days must be 1, 7 or 30.")
+    return await leaderboard.top_links(session, context.workspace.id, days, limit)
 
 
 @router.get("/{code}", summary="Link metadata (workspace, token, or public)")
