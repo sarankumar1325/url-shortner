@@ -20,17 +20,16 @@ Most shorteners hide the destination, which is exactly why people distrust short
 
 - **Peek.** Adding `+` to any short link (`/{code}+`) shows the destination, its expiry and offline warning signs (plain HTTP, raw IP, look-alike punycode domain, another shortener hiding the real target, unusual port) before visiting. It never fetches the destination and never counts a click. The link detail page has **Copy preview link**, and the creation result explains the `+` trick.
 - **Readable dead ends.** Browsers opening an expired, paused, removed or unknown link get a branded page with next steps and a report link instead of raw JSON. API clients still receive Problem Details.
+- **Expiry fallback and visit limits.** Links can carry a `fallback_url` used after expiry or once a `max_clicks` cap is reached. Caps are enforced with one guarded Postgres update, and chat-app link previews do not use up visits. The list gains a "Used up" status and filter, the detail page shows "N of M visits used" with editing, and CSV exports include the new columns.
 - **Keyboard shortcuts.** `N` creates a link, `/` focuses search, `?` opens help; they are ignored while typing or when a dialog is open.
 
 ## Next increments (proposed, not built)
 
-1. **Expiry fallback destination.** Optional `fallback_url` so an expired campaign link lands somewhere useful instead of the expired page. Needs a migration, validation shared with `long_url`, and cache-entry changes.
-2. **Click caps (self-expiring links).** Optional `max_clicks` for one-time or limited links. Needs an atomic Redis counter on the redirect path and a clear rule for cache staleness and bot clicks.
-3. **Device-aware destinations.** Separate iOS, Android and desktop targets for app-install links, using the existing device classification.
-4. **Campaign presets and per-channel links.** Save UTM presets and generate one tagged link per channel from a single destination.
-5. **Traffic spikes.** Highlight links whose daily clicks jump well above their recent baseline, shown only when there is enough data.
-6. **Link activity history.** Who created, edited, paused or retagged a link, building team confidence before adding more admin controls.
-7. **Destination health checks.** Only after a backend design for SSRF protections, frequency, cost and false alarms.
+1. **Device-aware destinations.** Separate iOS, Android and desktop targets for app-install links, using the existing device classification.
+2. **Campaign presets and per-channel links.** Save UTM presets and generate one tagged link per channel from a single destination.
+3. **Traffic spikes.** Highlight links whose daily clicks jump well above their recent baseline, shown only when there is enough data.
+4. **Link activity history.** Who created, edited, paused or retagged a link, building team confidence before adding more admin controls.
+5. **Destination health checks.** Only after a backend design for SSRF protections, frequency, cost and false alarms.
 
 ## Validation and sequencing
 

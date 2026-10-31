@@ -245,6 +245,8 @@ Idempotency-Key: 8f14e45f-ea4d-4b1e-9c1a-5f0e2d7a6b31
 - `long_url`: required absolute HTTP(S) URL; [validation policy](short-links.md#destination-validation).
 - `custom_alias`: optional/null; lowercase `^[a-z0-9][a-z0-9_-]{1,30}[a-z0-9]$`, 3–32 characters, not reserved. Missing/null means generated code.
 - `expires_at`: optional/null means no expiry; otherwise strictly future, at most five years ahead.
+- `fallback_url`: optional/null; validated like `long_url`, errors use field `fallback_url`. Visitors are sent here once the link expires or runs out of visits.
+- `max_clicks`: optional/null; integer 1–1,000,000. Each counted redirect uses one visit; once used up, redirects go to `fallback_url` or return `410 link_exhausted`.
 - `Idempotency-Key`: required random UUIDv4; generate with `crypto.randomUUID()` or `uuid.uuid4()`.
 
 Return `201` with `Location: /api/v1/links/sysdesign` and:
@@ -258,7 +260,11 @@ Return `201` with `Location: /api/v1/links/sysdesign` and:
   "is_active": true,
   "expires_at": "2027-01-01T00:00:00Z",
   "created_at": "2026-10-23T12:00:00Z",
-  "updated_at": "2026-10-23T12:00:00Z"
+  "updated_at": "2026-10-23T12:00:00Z",
+  "tags": [],
+  "fallback_url": null,
+  "max_clicks": null,
+  "clicks_used": 0
 }
 ```
 
@@ -285,7 +291,7 @@ Returns `{ "links": [...], "total": n, "workspace_id": "...", "role": "owner" }`
 
 ## Update and delete
 
-PATCH accepts only `long_url`, `expires_at`, `is_active`, and requires at least one field. Null expiry clears it; omission preserves it. Null URL/active values are invalid. Code and operator block state cannot be changed. Workspace callers need `member`; legacy callers need a valid token. Revalidate URL/expiry, commit, then invalidate the positive cache best-effort.
+PATCH accepts only `long_url`, `expires_at`, `is_active`, `tags`, `fallback_url` and `max_clicks`, and requires at least one field. Null expiry, fallback or visit limit clears it; omission preserves it. Clearing `max_clicks` resets `clicks_used`; raising it allows more visits. Null URL/active values are invalid. Code and operator block state cannot be changed. Workspace callers need `member`; legacy callers need a valid token. Revalidate URL/expiry, commit, then invalidate the positive cache best-effort.
 
 For v1, concurrent valid PATCH operations use last-committed-write-wins for supplied fields. Do not auto-retry PATCH after ambiguous failure: read authenticated metadata and ask the user to confirm.
 
@@ -376,7 +382,7 @@ Both routes require `Authorization: Bearer <CRON_SECRET>` and return `503 depend
 
 ## Redirects
 
-GET resolves state, awaits a bounded enqueue attempt, and emits `302` with Location, `no-store`, `X-Robots-Tag: noindex, nofollow` and `Referrer-Policy: no-referrer`. HEAD emits identical status/headers but no body/event. Other methods return `405` and never record a click. Redirects never require a session and never expose workspace membership.
+GET resolves state, awaits a bounded enqueue attempt, and emits `302` with Location, `no-store`, `X-Robots-Tag: noindex, nofollow` and `Referrer-Policy: no-referrer`. HEAD emits identical status/headers but no body/event. Other methods return `405` and never record a click. Expired links with a `fallback_url` redirect there (and count the click) instead of returning `410`. For links with `max_clicks`, a counted GET uses one visit atomically in Postgres; HEAD, Peek and link unfurlers (bot user agents plus WhatsApp-style previewers) only check that a visit remains. The positive cache still applies, so adding a cap may take up to the cache TTL to take effect. Redirects never require a session and never expose workspace membership.
 
 When a `404` or `410` request accepts `text/html`, the response is an escaped, self-contained HTML page with the same status, `no-store`, `noindex`, `nosniff` and a `default-src 'none'` CSP; other clients keep Problem Details. Unavailable pages do not distinguish missing, deleted, blocked and paused links.
 

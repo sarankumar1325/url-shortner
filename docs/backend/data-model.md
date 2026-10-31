@@ -170,6 +170,9 @@ CREATE TABLE urls (
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     is_blocked BOOLEAN NOT NULL DEFAULT FALSE,
     expires_at TIMESTAMPTZ,
+    fallback_url TEXT CHECK (fallback_url IS NULL OR char_length(fallback_url) BETWEEN 1 AND 8192),
+    max_clicks INTEGER CHECK (max_clicks IS NULL OR max_clicks BETWEEN 1 AND 1000000),
+    clicks_used INTEGER NOT NULL DEFAULT 0 CHECK (clicks_used >= 0),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     deleted_at TIMESTAMPTZ,
@@ -187,6 +190,7 @@ CREATE INDEX urls_workspace_created_idx ON urls(workspace_id, created_at);
 ```
 
 - IDs are internal, never required in browser JSON (avoids JavaScript bigint precision problems).
+- `clicks_used` counts visits only while `max_clicks` is set. It is incremented by one guarded `UPDATE … WHERE clicks_used < max_clicks RETURNING id`, so concurrent redirects cannot exceed the cap; clearing the cap resets it to zero. It is separate from analytics, which stay eventual.
 - The case-sensitive unique constraint includes deleted rows; codes never change or get reused.
 - Service validation enforces reserved codes, safe URL schemes and expiry relative to request time; database checks are the final integrity boundary.
 - `is_blocked` is operator-owned and cannot be changed by a token or workspace member. Operators must audit block actions without logging targets or tokens.
