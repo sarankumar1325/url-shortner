@@ -1,6 +1,6 @@
 # Observability, SLOs and Recovery
 
-Status: proposed targets, not measured results · [Capacity](caching-and-scale.md) · [Deployment](deployment.md)
+Status: safe JSON access logging is implemented; SLOs, metrics, tracing and alerts remain proposed targets, not measured results · [Capacity](caching-and-scale.md) · [Deployment](deployment.md)
 
 ## Measurement definitions
 
@@ -20,6 +20,10 @@ Include cold starts in availability and overall latency dashboards; report warm/
 These targets need load/deployed-region validation. An accepted-event freshness SLO does not prove capture completeness. Report enqueue failures/unknown outcomes independently. A 99.9% time-based 30-day budget is 43.2 minutes; a **request-based** budget is 0.1% of eligible requests, not a fixed amount of downtime.
 
 ## Safe structured logging
+
+Implemented now: every request emits one JSON line to stdout through the `shortly.access` logger with `event`, `service`, `environment`, validated `request_id`, `method`, matched route template (or `unmatched`), `status`, `duration_ms` and problem `error_code`. Raw paths, query strings, short codes, headers, cookies, tokens, IPs and user agents are never logged. Unhandled exceptions log `status=500` and `error_code=internal_error` before the generic response is produced.
+
+Not yet implemented: log shipping/retention policy, metrics, tracing, dashboards and alerts. The remaining requirements below are targets, not deployed behavior.
 
 Generate/validate bounded UUID request IDs and echo `X-Request-ID`. Log JSON with service, environment, commit SHA, route template, method, status, duration, cache outcome and error code. Avoid raw request paths/query strings and per-link logs by default.
 
@@ -43,7 +47,8 @@ Use route/status/error enums as metric labels. Never label metrics with short co
 - Unread count/age, pending count/oldest age, stream bytes/entries, capacity percentage, trimmed-pending IDs.
 - Committed inserted/duplicate/rejected events, drain time/throughput, successful drain time, capture-to-ingest latency.
 - ACK/delete failures, retention backlog, redacted poison-event reasons.
-- Remember: XLEN includes retained acknowledged entries until deleted, and XPENDING excludes never-read entries. Neither alone measures backlog.
+- `GET /internal/analytics/status` returns the current snapshot: stream depth, group lag, pending count and oldest age, dead-letter depth, legacy list depth, and Redis availability. The analytics response embeds the same data as `freshness`.
+- Remember: acknowledged entries are deleted, so `XLEN` approximates pending plus not-yet-read entries; `XPENDING` excludes never-read entries. Neither alone measures backlog. Dead-letter depth is the count requiring human follow-up.
 
 **Product/operations**
 
@@ -64,6 +69,8 @@ Tune thresholds against representative load; low-traffic services need canaries 
 | P1 | Sustained eligible redirect errors or active canary failure | Inspect recent deploy, edge policies, Redis/Neon health |
 | P2 | Redirect p95 >200 ms for 10 minutes | Split cold starts, cache latency and DB pool waiting |
 | P2 | No successful drain for 15 minutes, or oldest unprocessed age >10 minutes | Check cron/auth and bounded manual drain |
+| P2 | Dead-letter depth >0 and increasing, or any `max_attempts_exceeded` event | Inspect `XRANGE clicks:dead`, fix the systemic cause before replaying |
+| P2 | Group pending >1,000 or lag >5,000 for 15 minutes | Measure drain throughput, DB latency and producer rate; raise drain budget only after checking cost |
 | P2 | Stream/DB/command budget near configured capacity | Measure backlog growth, throughput and spend; avoid blindly increasing caps |
 | P2 | Create/management limiter degraded | Restore Redis; keep expensive routes fail-closed |
 | P2 | Cache invalidation failure during takedown | Verify edge denial on all backend hosts |

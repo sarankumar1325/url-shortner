@@ -1,20 +1,20 @@
 # ADR 0002: Neon Postgres + Upstash Redis
 
-Status: Accepted stack; service configuration/benchmarks pending · Reviewed: 2026-10-23
+Status: Accepted stack; service configuration/benchmarks pending · Reviewed 2026-10-23 · Amended 2026-10-24: accounts/workspaces shipped per ADR 0006, and the event buffer is a Redis list rather than a consumer-group stream
 
 ## Decision
 
-Neon Postgres is authoritative for links, token hashes, atomic create-replay records, raw clicks and daily totals. Upstash Redis holds positive redirect cache entries, distributed limiter state and a bounded event stream. Co-locate with the Vercel function region.
+Neon Postgres is authoritative for users, sessions, workspaces, memberships, invitations, links, token hashes, atomic create-replay records, raw clicks and daily totals. Upstash Redis holds positive redirect cache entries, fixed-window limiter counters and a bounded click-event list. Co-locate with the Vercel function region.
 
-Keep one database schema and modular services. Do not create unused user tables; account ownership can be added with a nullable foreign key in a later expand migration.
+Keep one database schema and modular services. The original plan deferred account tables; [ADR 0006](0006-accounts-and-workspaces.md) supersedes that for the shipped multi-tenant model. Do not add speculative tables beyond implemented features.
 
 ## Reasons and constraints
 
 Postgres provides transactions and unique constraints for concurrent allocation, replay and deduplication. Neon pooled endpoints suit ephemeral clients, but pooler client limits are not database throughput. Validate SQLAlchemy/asyncpg TLS, prepared statements and small client pools on the pinned versions.
 
-Upstash provides shared cache/limiter/buffer state, but verify actual script/Stream/claim support and quotas. Three baseline Redis operations per warm GET (limit/read/enqueue) plus worker commands have real cost. Avoid eviction of stream/limiter data; enforce byte/count budgets or isolate cache eviction.
+Upstash provides shared cache/limiter/buffer state, but verify actual command, list/stream and quota support. Four baseline Redis commands per warm GET (limit increment/expiry, cache read, event append) plus drain commands have real cost. Avoid eviction of buffered events/limiter data; enforce byte/count budgets or isolate cache eviction.
 
-Redis is not authoritative for create replay: a DB commit followed by a failed Redis write would lose the original token-bearing response. Use a single DB transaction with short-lived AEAD-encrypted replay data instead.
+Redis is not authoritative for create replay: a DB commit followed by a failed Redis write would lose the original response. Use a single DB transaction with short-lived AEAD-encrypted replay data instead.
 
 ## Failure and privacy tradeoffs
 
@@ -24,7 +24,7 @@ Rich events dominate storage at sustained traffic. Measure 90-day raw retention 
 
 ## Alternatives
 
-Postgres alone is operationally simpler but increases redirect/limiter database load. Supabase offers identity/storage not needed for anonymous v1. NoSQL can be viable at scale but changes transaction/query modelling; it is not categorically incapable of uniqueness or atomic operations.
+Postgres alone is operationally simpler but increases redirect/limiter database load. Supabase offers identity/storage that this first-party account design does not need. NoSQL can be viable at scale but changes transaction/query modelling; it is not categorically incapable of uniqueness or atomic operations.
 
 A Marketplace Redis integration is a provisioning channel, not necessarily another vendor or reduced vendor count. Self-hosting shifts availability, upgrades and backup responsibilities to this project; not warranted for v1.
 

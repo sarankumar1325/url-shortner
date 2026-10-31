@@ -1,73 +1,94 @@
 # Analytics Pipeline
 
-Status: target design · [Data model](data-model.md) · [ADR 0004](../adr/0004-async-analytics.md)
+Status: implemented with a Redis Streams consumer group, ACK-after-commit, stale-message reclaim, a dead-letter stream, drain-on-read and daily cron · [Data model](data-model.md) · [ADR 0004](../adr/0004-async-analytics.md)
 
 ## Delivery contract
 
-V1 captures rich click events best-effort, buffers them in Upstash Redis Streams, and ingests into Neon asynchronously. The redirect **awaits one bounded enqueue attempt**; parsing the UA, SQL inserts and aggregation happen later. This removes SQL writes from the hot path, not all analytics latency.
+Click capture is best-effort and asynchronous. Once an event is accepted into Redis, ingestion is **at-least-once**: it is acknowledged only after its database transaction commits, and unacknowledged events are reclaimed and retried. The database deduplicates by `event_id`, so retries cannot double-count.
 
-- Capture can fail or time out; a redirect must still succeed.
-- Retained accepted events may be delivered repeatedly. Database deduplication prevents duplicate counting, including overlapping workers.
-- Buffer overflow, prolonged outages, poison events and events outside the acceptance horizon may lose analytics.
-- No end-to-end exactly-once, lossless, unique-visitor, or exact-human-click guarantee.
+- The redirect awaits one bounded `XADD`; a Redis error or timeout still returns the `302`.
+- A worker crash, timeout, or failed commit leaves the batch pending. Another drain reclaims it after an idle threshold.
+- Malformed payloads and messages that exceed the delivery budget move to a bounded dead-letter stream instead of blocking the queue.
+- Enqueue failure, Redis data loss, provider eviction, and capacity exhaustion can still lose events. No end-to-end exactly-once, lossless, unique-visitor or exact-human-click guarantee is offered.
+- `HEAD`, `OPTIONS`, `404`, `410`, `429` and failed redirects never emit clicks. Link-preview GETs can count but are classified best-effort as bots.
 
 ```mermaid
 flowchart LR
-    GET[Successful GET] -->|bounded enqueue| Stream[(Upstash stream)]
-    Cron[Authenticated schedule] --> Worker[20-second bounded drain]
-    Stream --> Worker
-    Worker -->|deduplicate and increment in one transaction| DB[(Raw events and rollups)]
-    Worker -->|ACK then delete after commit| Stream
-    API[Private analytics API] --> DB
+    GET[Successful GET] -->|XADD one bounded event| Stream[(clicks:stream)]
+    Cron[Authenticated daily cron] --> Drain[Bounded drain]
+    AnalyticsRead[Analytics read with DRAIN_ON_READ] --> Drain
+    Legacy[(legacy clicks:pending list)] -->|RPOPLPUSH + XADD| Stream
+    Stream -->|XREADGROUP / XAUTOCLAIM| Drain
+    Drain -->|dedupe + increment in one transaction| DB[(Raw events and rollups)]
+    Drain -->|XACK + XDEL after commit| Stream
+    Drain -->|malformed or attempts exhausted| Dead[(clicks:dead)]
+    AnalyticsRead --> DB
+    AnalyticsRead -->|status snapshot| Stream
 ```
 
 ## Event capture
 
-Illustrative versioned payload:
+The redirect constructs and classifies the event before enqueue:
 
 ```json
 {
-  "v": 1,
   "event_id": "8f14e45f-ea4d-4b1e-9c1a-5f0e2d7a6b31",
   "url_id": 42,
   "clicked_at": "2026-10-23T12:00:00.123Z",
-  "user_agent": "Mozilla/5.0",
   "referer_origin": "https://example.com",
-  "country": "US"
+  "country": "US",
+  "device_type": "desktop",
+  "is_bot": false
 }
 ```
 
-- Create one UUIDv4 event ID per successful GET; preserve it if a producer retry is ever introduced. V1 does not retry enqueue on the hot path.
-- HEAD, OPTIONS, 404, 410, 429 and failed redirects do not emit clicks. Link-preview GETs can count but are classified best-effort as bots.
-- Cap serialized event size (4 KiB), UA at 512 characters, origin at 2048; validate before enqueue and at ingestion.
-- Keep only the referrer **origin** after HTTP(S) parsing: remove userinfo, path, query and fragment. Missing, invalid or self-referring origins become null. Paths can contain personal data too.
+- Create one UUIDv4 event ID per successful GET and timestamp it server-side. There is no enqueue retry on the hot path.
+- Keep only the referrer **origin** after HTTP(S) parsing: remove userinfo, path, query and fragment. Missing, invalid or self-referring origins become null.
 - Country is a validated two-letter platform value; untrusted local headers are not accepted as geo evidence.
-- No IP/hash in the event. IP is used transiently for rate limiting only. No persistent visitor identifier is necessary for the chosen metrics.
-- A 50 ms application deadline bounds enqueue including connection acquisition. Timeout may mean accepted-or-lost, not certain loss. Do not fall back to SQL or untracked background tasks.
-- Worker classifies device and bot flag, discards raw UA, and persists only coarse dimensions. Classification is heuristic.
+- The user agent is classified at redirect time and **not** stored in the queue or database. Persisted fields are the coarse `device_type` and `is_bot` flag.
+- No IP/hash is included in the event. IP is used transiently for rate limiting only. There is no persistent visitor identifier.
+- Enqueue uses the normal Redis client timeout and is wrapped so a Redis error never fails a valid redirect. A timeout may mean accepted-or-lost, not certain loss. Do not fall back to SQL or untracked background tasks.
+- Device/bot classification is heuristic. Bots are detected by user-agent markers, not reputation data.
 
-## Buffer limits and recovery
+## Stream keys and consumer group
 
-Environment-specific stream/group keys; initialize the consumer group with `0-0` to include existing backlog, tolerating only the documented already-exists response. Redis capabilities must pass an integration test against the selected Upstash service before rollout.
+| Key | Purpose |
+| --- | --- |
+| `clicks:stream` | Append-only event stream. Producers use `XADD`; the consumer group uses `XREADGROUP`. |
+| `analytics` | Single consumer group over `clicks:stream`, created on demand with `MKSTREAM`. |
+| `clicks:dead` | Bounded dead-letter stream (`MAXLEN ~ 10,000`) for poison and exhausted events. |
+| `clicks:pending` | Legacy list from pre-stream deployments. Emptied by the migration path. |
+| `clicks:pending:processing` | Migration parking list; entries are recoverable if the process dies mid-move. |
 
-- Read up to 500 entries and a bounded total byte budget per batch; tune from measurements.
-- Reclaim pending entries older than five minutes with a supported claim operation; verify ownership can be recovered after a crash.
-- Each invocation spends at most 20 seconds taking/processing batches under a 30-second function limit. Do not start a batch without commit/ACK headroom.
-- An optional lease reduces overlap but does not establish correctness; if used, release only the caller's token atomically, and tolerate lease expiry.
-- ACK only after DB commit. **XACK does not remove stream entries**: subsequently XDEL committed IDs. Use a supported atomic ACK/delete sequence for the single consumer group, and bounded cleanup for acknowledged leftovers after crashes.
-- Adding another consumer group changes deletion safety and requires redesign; do not delete data another group still needs.
+- Consumers are named per process (`host-pid-random`) so concurrent drains claim their own messages.
+- The production deployment normally runs one drain at a time (cron or analytics read), but the protocol is safe with overlapping consumers: each message is owned by one consumer, and idempotent persistence makes handovers harmless.
+- `XACK` does not free stream memory. Acknowledged messages are also `XDEL`-ed in the same pipeline. Unacknowledged messages remain stored until claimed, retried, or dead-lettered.
+- No time-based `XTRIM` is used because it could discard still-pending payloads.
 
-Set a maximum event count **and byte budget**, and age-limit unprocessed data to 24 hours. A tentative million-entry cap must fit the selected plan; at 1,000 events/s it covers only 16.7 minutes, not a day. `MAXLEN ~` can exceed its target and trim unread/pending payloads; it is a lossy safety cap, not durable retention. Alert on capacity, deleted-pending IDs and the oldest **unread as well as pending** entry.
+## Buffer and drain
+
+`DRAIN_ON_READ=true` drains up to 500 events before an analytics query. This keeps the free-plan deployment reasonably fresh between daily cron runs; it is not a guaranteed freshness bound. The daily cron drains up to 5,000 events.
+
+Each drain performs:
+
+1. **Ensure the consumer group** with `XGROUP CREATE ... MKSTREAM`; `BUSYGROUP` is treated as success.
+2. **Migrate legacy list entries** (bounded at 200): recover anything parked in `clicks:pending:processing`, then `RPOPLPUSH` from `clicks:pending` into the processing list, `XADD` it to the stream, and `LREM` it. A crash at any point leaves the entry recoverable; replay duplicates are deduplicated by `event_id`.
+3. **Reclaim stale pending messages** (bounded at 100): read `XPENDING` details. Entries idle at least `ANALYTICS_CLAIM_MIN_IDLE_SECONDS` (default 60) are candidates. Candidates whose delivery count reached `ANALYTICS_MAX_ATTEMPTS` (default 5) are dead-lettered with their last payload and acknowledged. The rest are claimed with `XAUTOCLAIM` and processed normally.
+4. **Read new messages** with `XREADGROUP` in batches of 200, up to the invocation budget, and process/acknowledge each batch before reading the next.
+5. **Sort valid events** by `(url_id, day)` before upsert to reduce deadlock risk between overlapping drains.
+
+Important Upstash detail: the ranged `XPENDING` form takes the count positionally (`XPENDING key group - + 100`); it does not accept a `COUNT` keyword.
 
 ## Transactional ingestion
 
-For valid events no older than 24 hours and no more than five minutes ahead of worker time:
+For each batch:
 
-1. Validate event version and fields; ensure `url_id` exists. Handle erased/deleted/blocked destinations according to retention policy; never poison the entire batch with a missing foreign key.
-2. Begin a DB transaction; insert events with `ON CONFLICT (event_id) DO NOTHING RETURNING url_id, clicked_at, is_bot`.
-3. Aggregate only returned rows by `(url_id, UTC day)`.
-4. Atomically increment daily totals from these deltas; commit both raw events and totals together.
-5. ACK/delete the stream entries. On failure before commit retry later; on failure after commit redelivery inserts nothing and does not change totals.
+1. Parse and validate the envelope (`event_id`, `url_id`, `clicked_at`). Invalid payloads go to `clicks:dead` with reason `malformed_event`.
+2. Insert raw rows with `ON CONFLICT (event_id) DO NOTHING RETURNING url_id, clicked_at, is_bot`.
+3. Aggregate **only the returned rows** by `(url_id, UTC day)`.
+4. Atomically increment daily totals by those deltas and commit raw events and rollups together.
+5. **After** the commit succeeds, pipeline `XACK` and `XDEL` for the batch. On a database failure, roll back and leave the batch pending; it is retried after the idle threshold.
+6. If the acknowledgement itself fails, the committed rows remain and the message is reclaimed later; `event_id` dedup prevents double counts.
 
 Illustrative single-event SQL (bind parameters, execute within the batch transaction):
 
@@ -79,49 +100,102 @@ WITH inserted AS (
     RETURNING url_id, clicked_at, is_bot
 )
 INSERT INTO click_daily (url_id, day, clicks, human_clicks, bot_clicks)
-SELECT url_id, (clicked_at AT TIME ZONE 'UTC')::date,
-       count(*), count(*) FILTER (WHERE NOT is_bot), count(*) FILTER (WHERE is_bot)
+SELECT url_id, (clicked_at AT TIME ZONE 'UTC')::date, count(*),
+       count(*) FILTER (WHERE NOT is_bot), count(*) FILTER (WHERE is_bot)
 FROM inserted
-GROUP BY 1, 2
-ORDER BY 1, 2
+GROUP BY url_id, (clicked_at AT TIME ZONE 'UTC')::date
 ON CONFLICT (url_id, day) DO UPDATE SET
     clicks = click_daily.clicks + EXCLUDED.clicks,
     human_clicks = click_daily.human_clicks + EXCLUDED.human_clicks,
     bot_clicks = click_daily.bot_clicks + EXCLUDED.bot_clicks;
 ```
 
-Multi-event batches use the same rule and ordered upserts. This is idempotent because duplicate events contribute zero delta. Recomputing full-day totals and overwriting them from concurrent snapshots is unsafe even if a Redis lock usually prevents overlap.
+The implementation uses SQLAlchemy upserts grouped in the same transaction rather than this exact statement; the invariant is what matters.
 
-Discard unsupported/malformed/too-old payloads into a **bounded redacted diagnostic record** (event/stream ID, reason, version, no raw header/token/URL contents), then ACK/delete and count them. Do not retry poison entries forever. Keep diagnostics at most seven days and cap size/count. Retry transient DB faults without acknowledging valid entries; if diagnostic storage is unavailable, emit a privacy-safe counter/log and still discard a permanently invalid entry.
+## Dead letters
 
-Raw event retention is 90 UTC days and rollups two years. Reject older-than-24-hour events before insert so a replay cannot bypass a dedupe row already removed by retention. Run retention before public launch, not after accumulating sensitive data.
+`clicks:dead` entries contain `source_id`, `reason`, a payload preview truncated to 1,000 characters, and `failed_at`. Reasons:
 
-## Scheduling and authentication
+- `malformed_event`: JSON parse or required-field validation failed.
+- `max_attempts_exceeded`: the message was delivered/claimed `ANALYTICS_MAX_ATTEMPTS` times without a successful commit.
 
-Vercel production cron calls GET `/internal/analytics/drain` with `Authorization: Bearer $CRON_SECRET`; **`CRON_SECRET` is unprefixed**. Reject missing configuration and wrong headers with no side effects. Return only counts, duration and lag diagnostics; use `no-store`.
+Dead letters are diagnostic, not replayable automatically. Inspect with `XRANGE clicks:dead - + COUNT 20`. After fixing a systemic cause, an operator can replay a payload by `XADD`-ing it back to `clicks:stream` (dedup keeps replay safe) and should then acknowledge/delete the dead entry. Never bulk-replay without checking that the underlying issue is resolved.
 
-- Pro/Enterprise currently support every-minute schedules; Hobby allows daily schedules and rejects `* * * * *` during deployment.
-- Cron uses UTC and production deployments; ordinary previews need explicitly authorized manual tests.
-- Runs may be missed/duplicated; failures are not automatically retried by cron. Pending-entry reclamation and alerts are mandatory.
-- If minute-level Vercel cron is unavailable, validate an external scheduler such as QStash before choosing it. Its method/auth/signature and retry semantics need their own integration; it is not automatically compatible with the Vercel GET/bearer route.
-- Daily freshness does not satisfy the v1 two-minute target. Resolve the scheduler budget before shipping analytics.
+## Freshness and status
 
-Run GET `/internal/maintenance` daily with the same production auth boundary. Batch cleanup of replay records, raw events, rollups and diagnostics within a deadline; it does not toggle expired-link active state.
+`GET /internal/analytics/status` (cron-authenticated) returns an operational snapshot:
 
-## Read model and freshness
+```json
+{
+  "redis_ok": true,
+  "consumer": "host-123-4f2a1c",
+  "stream_depth": 0,
+  "pending": 0,
+  "lag": 0,
+  "oldest_pending_age_seconds": null,
+  "dead_letter_depth": 0,
+  "legacy_pending": 0,
+  "legacy_in_flight": 0,
+  "generated_at": "2026-10-25T11:10:15Z"
+}
+```
 
-The [API](api.md#analytics) defines date-only UTC half-open ranges, zero-filled rollups, top referrer origins/countries, device categories, and clipped 90-day breakdowns. Use a consistent DB snapshot so counts do not change between related queries.
+- `stream_depth` includes pending/unacknowledged entries, because acknowledged entries are deleted.
+- `pending` is `XPENDING` count for the group; `lag` comes from `XINFO GROUPS`.
+- `oldest_pending_age_seconds` is the idle time of the oldest pending entry.
+- Redis failures return `redis_ok: false` with null metrics instead of failing the request.
 
-`last_processed_at` is per-link latest retained raw-event ingestion time; no events means null. `data_through` is null in v1 because capture loss prevents a completeness claim. Do not infer pipeline health from one event timestamp. Operator metrics separately track successful drains, unread lag, pending age, enqueue outcomes and backlog.
+The analytics response embeds the same snapshot as `freshness` (`pending_events`, `lag_events`, `oldest_pending_seconds`, `dead_letter_events`, `captured_at`, `redis_ok`). The browser shows “Ingestion queue is clear,” the queued count and oldest age, or an unavailable warning. Freshness describes the shared pipeline, not proof that every individual click was captured.
 
-Target p95 admitted-event freshness under two minutes in healthy operation; five-minute reclaim and backlog make this an SLO, not a per-request guarantee. Expose partial/stale states in the UI.
+## Rollups and breakdowns
 
-## Acceptance and operational tests
+- Daily rollups drive totals and the zero-filled series for any range retained (two years).
+- Breakdowns come from raw events in the last 90 UTC days, including today, intersected with the requested `[from, to)`.
+- Top referrer origins and countries are limited to 10; devices are limited to the observed categories (at most four). Unknown/null is a real category, not “direct traffic.”
+- `last_processed_at` is the newest `ingested_at` among retained raw events for the link, or null. It is not a queue-health proof.
+- `data_through` remains **null in V1**: global capture is still best-effort at enqueue, so complete event-time coverage cannot be certified.
+- The API reports the effective breakdown range and `truncated`; no raw overlap returns null boundaries and empty arrays while rollup totals remain available. Reads sum rollups; they never add raw-event counts to totals.
 
-- Duplicate event within a batch, across batches, and across concurrent drains increments exactly once.
-- Crash before insert, before commit, after commit/before ACK, and after ACK/before deletion; no acknowledged valid event lacks its DB effects.
-- Lost lease, overlapping workers, recovery of pending entries, unknown event version, foreign-key deletion race, trim of a pending ID, and retention-boundary replay.
-- Measured drain throughput greater than sustained production capture with catch-up headroom; a batch size alone proves no throughput.
-- Alert at ten minutes of oldest unprocessed age, fifteen minutes without a successful drain, and before byte/entry caps. Record dropped/uncertain enqueue outcomes separately from known malformed drops.
+## Retention and cleanup
 
-Official scheduling references: [Cron management](https://vercel.com/docs/cron-jobs/manage-cron-jobs), [plan limits](https://vercel.com/docs/cron-jobs/usage-and-pricing). Provider behavior was reviewed on 2026-10-23; validate again before deployment.
+The `internal/maintenance` cron runs bounded retention statements in one transaction:
+
+- Expired user sessions, deleted in bounded batches.
+- Expired, accepted, or revoked workspace invitations, deleted in bounded batches.
+- Create-replay rows whose `expires_at` has passed.
+- Raw clicks older than the configured 90-day cutoff (00:00 UTC on `today_utc - 89 days`).
+- Daily rollups older than the configured 730-day cutoff.
+
+Deleting a link cascades its raw events, rollups and replay rows. Analytics reads also enforce the visible windows, so delayed cleanup does not expand the API's reported range. Monitor cleanup duration and row counts; a single unbounded `DELETE` can become expensive as the corpus grows. Dead-letter trimming is bounded by `MAXLEN ~ 10,000` and needs no maintenance job.
+
+## Failure behavior
+
+| Failure | Behavior |
+| --- | --- |
+| Redis enqueue timeout/error | Redirect still succeeds; click may be lost |
+| Redis unavailable during drain | Drain reports `redis_ok: false`; events remain buffered if Redis returns |
+| Worker crash after read, before commit | Messages stay pending; reclaimed after the idle threshold |
+| Database failure during persist | Transaction rolls back; batch stays pending and is retried |
+| Commit succeeds, ACK fails | Message is reclaimed; dedup prevents double counts |
+| Malformed stream entry | Moved to `clicks:dead`, then acknowledged |
+| Repeated failure (5 attempts) | Moved to `clicks:dead` with reason `max_attempts_exceeded` |
+| Legacy list migration crash | Entry remains in the processing list and is recovered |
+| Missed cron | Drain-on-read provides limited catch-up; freshness is not guaranteed |
+| Duplicate delivery/replay | Insert conflict; no duplicate counts or rollup deltas |
+
+## Test and capacity gates
+
+Covered by `backend/tests/test_analytics_streams.py` and existing helper tests:
+
+- classification and referrer-origin parsing;
+- ACK only after a successful commit, and no ACK after a failed commit;
+- malformed payload dead-lettering;
+- exhausted-attempt dead-lettering;
+- stale pending reclaim versus fresh pending;
+- lossless legacy migration and in-flight recovery;
+- status snapshot parsing, missing-group handling and Redis-down degradation;
+- Redis transport/HTTP/JSON failures becoming `RedisError` so redirect capture fails open;
+- fail-open capture;
+- rollup deltas from inserted rows only.
+
+Capacity work must measure enqueue latency, drain throughput, database transaction time, pending age and stream growth under an authorized isolated load test. Do not claim lossless ingestion or a two-minute freshness bound on the current free-plan deployment. See [observability](observability.md) for alert thresholds and [deployment](deployment.md) for backup/restore.

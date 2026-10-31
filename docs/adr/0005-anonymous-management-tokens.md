@@ -1,6 +1,6 @@
 # ADR 0005: Per-Link Anonymous Management Capabilities
 
-Status: Accepted direction; replay/storage/security semantics refined · Reviewed: 2026-10-23
+Status: Superseded for new links by [ADR 0006](0006-accounts-and-workspaces.md); legacy unowned links keep this capability path · Reviewed: 2026-10-24
 
 ## Decision
 

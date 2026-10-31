@@ -1,11 +1,11 @@
 # Short-Link Strategy
 
-Status: target design · Related: [API](api.md) · [Data model](data-model.md) · [ADR 0003](../adr/0003-short-code-strategy.md)
+Status: implemented; ownership now workspace-based for new links, with legacy token access retained · Related: [API](api.md) · [Data model](data-model.md) · [ADR 0003](../adr/0003-short-code-strategy.md) · [ADR 0006](../adr/0006-accounts-and-workspaces.md)
 
 ## Generated codes
 
-- Generate 7 case-sensitive Base62 characters using `secrets.choice`.
-- Namespace: `62^7 = 3,521,614,606,208`; entropy: about 41.7 bits.
+- Generate 5 case-sensitive Base62 characters using `secrets.choice`.
+- Namespace: `62^5 = 916,132,832`; entropy: about 29.8 bits. Existing 7-character codes remain valid.
 - Enforce uniqueness in Postgres, including soft-deleted codes. Never recycle codes.
 - Reserve service routes for generated codes as well as custom aliases.
 - Randomness discourages sequential enumeration; a short code is public, NOT an authorization secret.
@@ -18,7 +18,7 @@ ALPHABET = string.ascii_letters + string.digits
 
 
 def generate_code() -> str:
-    return "".join(secrets.choice(ALPHABET) for _ in range(7))
+    return "".join(secrets.choice(ALPHABET) for _ in range(5))
 ```
 
 ### Collision handling
@@ -29,19 +29,20 @@ No pre-flight existence query guarantees uniqueness. The create transaction also
 
 ### Capacity and enumeration
 
-For `n` occupied generated-format codes, per-attempt collision probability is `n / 62^7`.
+For `n` occupied generated-format codes, per-attempt collision probability is `n / 62^5`.
 
 | Occupied codes | Collision probability | Approximate creates per retry |
 | --- | --- | --- |
-| 1 million | 0.0000284% | 3,521,615 |
-| 100 million | 0.00284% | 35,216 |
-| 1 billion | 0.0284% | 3,522 |
+| 100,000 | 0.0109% | 9,161 |
+| 1 million | 0.109% | 916 |
+| 10 million | 1.09% | 92 |
+| 100 million | 10.9% | 9.2 |
 
-The probability of *any* collision over many allocations is much higher (birthday effect); retries are required from day one. At one million allocations, that probability is about 13.2%. This is not namespace exhaustion.
+The probability of *any* collision over many allocations is much higher (birthday effect); retries are required from day one. At one million allocations, the expected number of collisions is about 546. Each is absorbed by the unique constraint and retry, so the operational cost is close to one extra insert per collision — not a failed request. Five retries are ample well beyond this scale; revisit the length when single-attempt collisions approach 10%.
 
-For enumeration, a guess hits *any* occupied code with probability `n / 62^7`, not `1 / 62^7`. Never market random links as private. Restrict sensitive content at the destination; protect management with the separate 256-bit token.
+For enumeration, a guess hits *any* occupied code with probability `n / 62^5`, not `1 / 62^5`. Never market random links as private. Restrict sensitive content at the destination; protect management with workspace membership or, for legacy links, the separate 256-bit token.
 
-Review code length when measured retries exceed 0.1%, or abuse analysis warrants more entropy; one billion rows alone does not require a KGS. Moving future generated codes to 8 characters can preserve all existing codes. A database sequence could allocate an ID in the same insert, but publicly encoding it would reveal ordering and aid enumeration.
+Longer future generated codes can coexist with existing ones after a compatible validator/schema change; the database constraint accepts both the current 5-character and legacy 7-character formats. A database sequence could allocate an ID in the same insert, but publicly encoding it would reveal ordering and aid enumeration.
 
 ## Custom aliases
 
@@ -57,6 +58,7 @@ Reserved path segments (case-insensitive comparison):
 
 ```text
 api, health, ready, docs, redoc, openapi.json, admin, login, logout, signup,
+invite, invitations, workspaces, members, settings,
 static, assets, favicon.ico, robots.txt, sitemap.xml, .well-known, well-known,
 internal, metrics, _next, graphql
 ```
@@ -89,14 +91,21 @@ Expiry is independent of active state; cleanup MUST NOT turn expired rows inacti
 
 Implement `HEAD /{code}` explicitly: same status and headers as GET, empty body, **no click event**. Invalid codes must never fall through to the frontend SPA. Error responses also use `no-store` so a missing code is not cached by clients before creation.
 
-## Management tokens
+## Management and ownership
 
-Use `secrets.token_urlsafe(32)` and a constant-time comparison of HMAC-SHA256 digests. Store a hash version alongside the digest; current/previous peppers allow controlled rotation without invalidating everyone at once. Tokens authorize a single link, not a user or a listing endpoint.
+New links are created by an authenticated workspace member and store `workspace_id` plus `created_by_user_id`; they have no management token. Authorization is membership resolved from Postgres on every request, using `X-Workspace-Id` (or the caller's personal workspace when omitted). Roles: `viewer` reads, `member` creates/updates/deletes, `admin` also manages people, `owner` manages admins. A non-member workspace is `404`, not `403`.
 
-The token is revealed during creation and replayed only for that same creation key within 24 hours. This requires the short-lived encrypted replay record in [data-model.md](data-model.md); it is not hash-only storage across the whole system. Tokens, replay keys, and decrypted responses never enter logs, URLs, metrics, or traces.
+Legacy links created before accounts have `workspace_id IS NULL` and retain the per-link capability:
+
+- Generate `secrets.token_urlsafe(32)` and compare HMAC-SHA256 digests in constant time. Store a hash version alongside the digest; current/previous peppers allow controlled rotation without invalidating every token at once.
+- Tokens authorize a single link, not a user or a listing endpoint, and are never combined with workspace access.
+- The token is revealed during creation and replayed only for that same creation key within 24 hours. This requires the short-lived encrypted replay record in [data-model.md](data-model.md); it is not hash-only storage across the whole system.
+- Tokens, replay keys, and decrypted responses never enter logs, URLs, metrics, or traces.
+
+List endpoints are workspace-scoped only; there is no public listing.
 
 ## Cache contract and tests
 
 [Cache policy](caching-and-scale.md) is authoritative: no negative cache in v1, positive cache age at most 60 seconds, best-effort invalidation after mutation. This is bounded staleness, not immediate revocation.
 
-Required tests: exact alias boundaries (1/2/3/32/33 characters), reserved generated codes, forced collisions, simultaneous creates, expiry at the boundary, disable/delete precedence, HEAD without analytics, IPv4/IPv6/IDNA/control-character validation, and token replay/rotation. Use deterministic randomness in tests rather than flaky distribution assertions.
+Required tests: exact alias boundaries (1/2/3/32/33 characters), reserved generated codes, forced collisions, simultaneous creates, expiry at the boundary, disable/delete precedence, HEAD without analytics, IPv4/IPv6/IDNA/control-character validation, workspace membership/RBAC denial, and legacy token replay/rotation. Use deterministic randomness in tests rather than flaky distribution assertions.

@@ -1,6 +1,6 @@
 # ADR 0004: Bounded Capture and Asynchronous Analytics
 
-Status: Accepted direction; delivery/rollup semantics refined · Reviewed: 2026-10-23
+Status: Accepted direction; delivery/rollup semantics refined · Reviewed: 2026-10-23 · Amended 2026-10-25: the shipped implementation now uses a Redis Stream consumer group (`XADD`/`XREADGROUP`), acknowledges only after commit, reclaims stale messages with `XAUTOCLAIM`, dead-letters poison/exhausted events, and migrates the legacy list. Live smoke verified enqueue → drain → committed row → queue clear.
 
 ## Decision
 
@@ -16,7 +16,7 @@ Do not recompute and overwrite whole-day totals from overlapping snapshots. Do n
 
 ## Delivery, retention and scheduler
 
-Capture is best-effort; accepted retained events are processed with at-least-once retry and DB deduplication. Trimming, buffer overflow, malformed events and outages can lose data. No end-to-end exactly-once or lossless guarantee.
+Capture is best-effort; accepted retained events are processed with at-least-once retry, stale-message reclaim and DB deduplication. Malformed and repeatedly failing events go to a bounded dead-letter stream. Enqueue failures, provider data loss, retaining metadata and outages can still lose data. No end-to-end exactly-once or lossless guarantee.
 
 Accept events up to 24 hours old, retain raw IDs/events for 90 UTC days, and totals for two years. The shorter acceptance horizon prevents replays beyond dedupe retention from double-counting totals. Retain no persistent IP/hash or raw UA in Postgres; rich dimensions do not need unique-visitor tracking.
 
