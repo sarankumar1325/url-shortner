@@ -105,7 +105,9 @@ For public unauthenticated resolution: missing/deleted/blocked/inactive → `404
 | GET | `/api/v1/links/{code}/analytics` | `200` private totals/series/breakdowns |
 | GET / HEAD | `/{code}` | `302`, `404` or `410`; HEAD never counts a click; browsers (`Accept: text/html`) get an HTML page for `404`/`410` |
 | GET | `/{code}+` | `200` HTML destination preview (Peek), or an HTML `404`/`410` page; never counts a click |
-| GET | `/api/v1/system/status` | `200` per-instance probes, circuit breaker, cache and rate-limit counters; signed-in users only |
+| GET | `/api/v1/dashboard?days=7\|30\|90` | `200` workspace totals with period-over-period change, daily series, breakdowns, status counts and per-link health (up to 500 links); any workspace role |
+| GET | `/api/v1/system/status` | `200` per-instance probes, circuit breaker, cache and rate-limit counters, plus a `config` block of the running tunables; signed-in users only |
+| POST | `/api/v1/system/trace` | `200` one redirect traced step by step with server timings (`{"code", "cold"}`); never counts a click or consumes a visit; workspace links only (`404` otherwise), same-origin, rate limited per user |
 | GET | `/health` | Dependency-free liveness |
 | GET | `/ready` | Dependency readiness; `503` if required service unavailable |
 | GET | `/internal/analytics/drain` | Cron-authenticated ingestion; no public data |

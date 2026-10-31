@@ -2,7 +2,7 @@
 
 Shortly is a URL shortener, but most of the code exists to make it behave well under load, during outages, and around untrusted input. The in-app **System design** page (`/system`) lists each technique with the file that implements it and, where possible, a live signal from the running API instance. This document is the written version of that page.
 
-Live numbers come from `GET /api/v1/system/status`. They are per instance, kept in memory, and reset on a cold start. They show behavior; they are not a metrics pipeline, a benchmark, or a capacity claim.
+Live numbers come from `GET /api/v1/system/status`. They are per instance, kept in memory, and reset on a cold start. They show behavior; they are not a metrics pipeline, a benchmark, or a capacity claim. The same response carries a `config` block (code length and space, every rate limit, cache TTLs, breaker thresholds, analytics and retention settings) read from the running code, and the page fills its descriptions from it, so the numbers in the app never drift from the deployment. The tables below quote the defaults at the time of writing.
 
 ## Request path
 
@@ -59,14 +59,48 @@ flowchart LR
 | Live alias availability | Syntax and reserved words, then a redirect-cache probe, then one indexed lookup. Rate limited per IP. Creation still enforces uniqueness. | `backend/src/backend/services/links.py` |
 | Privacy-first analytics | Referrer origin, country and device class only; no IP addresses. | `backend/src/backend/services/analytics.py` |
 
+## Request tracer
+
+The **Trace a real redirect** panel sends one of your links through the same code a visitor hits, step by step, and reports how long each step took on the server. `POST /api/v1/system/trace` with `{"code": "...", "cold": true}` runs:
+
+1. the redirect rate limiter (in its own `trace:` bucket, so tracing cannot lock real visitors out),
+2. an optional cache eviction when `cold` is true,
+3. the Redis cache read,
+4. on a miss, the single-flight leader election, the Postgres load and the cache fill,
+5. the expiry check and, for limited links, a read-only visit-limit check.
+
+The response lists each step with `ms`, an `outcome` (`hit`, `miss`, `leader`, `loaded`, `skipped`, ...) and a detail line, plus the response a visitor would get (`302`, `404` or `410` and the reason). It never appends a click event and never consumes a visit; the enqueue step is reported as `skipped`. **Cold vs warm** runs an evicting trace and then a cached one and shows the speedup. Traces are limited per user, and only links in the active workspace can be traced.
+
+## Workspace dashboard
+
+`/dashboard` shows every link in the workspace at once. `GET /api/v1/dashboard?days=7|30|90` drains a bounded batch of queued clicks first (when drain-on-read is enabled), then returns:
+
+- totals and a zero-filled daily series from rollups, with the previous period of the same length and the relative change,
+- referrer, country and device breakdowns from retained raw events,
+- a status count with one status per link, in the order blocked, expired, used up, then active or paused,
+- per-link health: clicks this and last period, last click time, visit-limit usage, and issues such as `expiring_soon` (within 7 days), `near_limit` (80% of visits used), `no_recent_clicks` (no clicks this period for links older than 7 days) and `serving_fallback`,
+- the same ingestion freshness snapshot as link analytics.
+
+The table is capped at 500 links, sorted by clicks.
+
 ## Endpoints added for the showcase
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/v1/links/availability?alias=` | Public, rate limited (120/min per IP, fails open). Returns `available` and a `reason` of `invalid`, `reserved` or `taken`. Soft-deleted codes count as taken. |
-| GET | `/api/v1/links/top?days=1\|7\|30&limit=1..10` | Workspace-scoped, cached 60 seconds. Response includes `cached` and `ttl_seconds`. |
-| GET | `/api/v1/system/status` | Requires a signed-in user. Dependency probes with latency, breaker state, cache hit ratio, single-flight leaders/shared counts, rate-limit outcomes and stream backlog. |
+| GET | `/api/v1/links/availability?alias=` | Public, rate limited per IP (fails open). Returns `available` and a `reason` of `invalid`, `reserved` or `taken`. Soft-deleted codes count as taken. |
+| GET | `/api/v1/links/top?days=1\|7\|30&limit=1..10` | Workspace-scoped, cached briefly. Response includes `cached` and `ttl_seconds`. |
+| GET | `/api/v1/system/status` | Requires a signed-in user. Dependency probes with latency, breaker state, cache hit ratio, single-flight leaders/shared counts, rate-limit outcomes, stream backlog and the `config` block. |
+| POST | `/api/v1/system/trace` | Workspace-scoped, same-origin, rate limited per user. Traces one redirect with per-step timings; never counts a click. |
+| GET | `/api/v1/dashboard?days=7\|30\|90` | Workspace-scoped. Totals with period-over-period change, series, breakdowns, status counts and per-link health. |
 
 ## QR studio
 
-The QR studio (`/qr`) runs entirely in the browser. It renders QR codes as SVG with selectable module and eye styles, custom colors and size, and an optional center label or logo. A center mark switches error correction to level H so the code still scans with the middle covered. Low contrast between foreground and background shows a warning. Downloads are SVG or PNG, and selecting several links produces one ZIP file built in the browser (stored, uncompressed entries).
+The QR studio (`/qr`) runs entirely in the browser; nothing is uploaded.
+
+- **Styles:** square, rounded, dots, bars, diamond, dither (an ordered 3×3 dither that fades across the code), halftone (dots that shrink toward the edges) and ASCII (characters instead of shapes, from `#@%&`, `0 1` or the link's own code). Finder patterns can be square, rounded or circular.
+- **Fonts:** sans, serif, mono, rounded and display, used for the center label and ASCII glyphs. Fonts are loaded before a raster export so the file matches the preview.
+- **Scan safety:** a center label or logo, or any artistic style, raises error correction to level H. Low contrast, inverted colors, a thin quiet zone and artistic styles show warnings. Every style, eye and font combination decodes with Chrome's built-in `BarcodeDetector` at 600 px, but test-scan prints anyway.
+- **Export:** PNG, JPEG, WebP, SVG, a print-ready PDF (fit-to-code, A4 or Letter; the image is rendered for 600 DPI at the chosen size, with an optional caption) and text art. The preview can be copied as an image, as SVG markup, as text art, or as the link itself.
+- **Bulk:** selecting several links produces one ZIP in any of those formats, built in the browser with stored entries.
+
+Each link's detail page also shows its QR code with a PNG download and a link into the studio.
