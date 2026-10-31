@@ -18,8 +18,10 @@ import {
   CircleHelp,
   Copy,
   ExternalLink,
+  Eye,
   Flag,
   Globe2,
+  Keyboard,
   LayoutGrid,
   Link2,
   LoaderCircle,
@@ -82,12 +84,14 @@ import {
   linksCsv,
   normalizeDestination,
   parseTags,
+  previewUrl,
   qrFileName,
   recordFromMetadata,
   titleFor,
   validateDraft,
   type LinkRecord,
 } from './links'
+import { shortcutFor } from './shortcuts'
 import './App.css'
 
 const MembersPage = lazy(() => import('./MembersPage'))
@@ -346,6 +350,10 @@ function CreateForm({
         <p className="result-disclaimer">
           This link is live in <strong>{workspaceName}</strong>. Anyone in this
           workspace with member access can manage it.
+        </p>
+        <p className="field-hint peek-hint">
+          <Eye size={14} aria-hidden="true" /> Add <kbd>+</kbd> to the end of
+          the link to preview its destination before visiting.
         </p>
         <details className="destination-disclosure">
           <summary>
@@ -910,6 +918,15 @@ function DetailPage({
           <button
             type="button"
             className="secondary-button"
+            onClick={() => onCopy(previewUrl(link.shortUrl))}
+            disabled={!link.shortUrl}
+            title="A preview link shows the destination and safety notes before anyone visits."
+          >
+            <Eye size={15} /> Copy preview link
+          </button>
+          <button
+            type="button"
+            className="secondary-button"
             onClick={() => void downloadQr()}
             disabled={!link.shortUrl || busyQr}
           >
@@ -1447,6 +1464,37 @@ function WorkspaceShell() {
     navigate('/login', { replace: true })
   }
 
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      const action = shortcutFor(
+        {
+          key: event.key,
+          metaKey: event.metaKey,
+          ctrlKey: event.ctrlKey,
+          altKey: event.altKey,
+          target: event.target instanceof HTMLElement ? event.target : null,
+        },
+        document.querySelector('dialog[open]') !== null,
+      )
+      if (action === null) return
+      if (action === 'new-link') {
+        if (!canEdit) return
+        event.preventDefault()
+        newLink()
+      } else if (action === 'search') {
+        const search = document.getElementById('link-search')
+        if (!search) return
+        event.preventDefault()
+        search.focus()
+      } else {
+        event.preventDefault()
+        setHelp(true)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  })
+
   if (!workspace || !role || !user) {
     return (
       <div className="boot-screen">
@@ -1886,6 +1934,27 @@ function WorkspaceShell() {
                 Sessions live in a secure, http-only cookie. Clicks record a
                 referrer origin, country, and device category. IP addresses and
                 unique visitors are not stored.
+              </p>
+            </div>
+          </div>
+          <div className="help-step">
+            <Eye size={19} />
+            <div>
+              <h3>Peek before you click</h3>
+              <p>
+                Add <kbd>+</kbd> to the end of any Shortly link to see where it
+                goes, with notes on unencrypted, raw-IP, look-alike, or
+                re-shortened addresses. Previews never count as clicks.
+              </p>
+            </div>
+          </div>
+          <div className="help-step">
+            <Keyboard size={19} />
+            <div>
+              <h3>Keyboard shortcuts</h3>
+              <p>
+                <kbd>N</kbd> new link · <kbd>/</kbd> search links ·{' '}
+                <kbd>?</kbd> this help
               </p>
             </div>
           </div>

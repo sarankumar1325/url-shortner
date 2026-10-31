@@ -54,6 +54,11 @@ export function displayShortUrl(url: string): string {
   return url.replace(/^https?:\/\//, '').replace(/\/$/, '')
 }
 
+/** A trailing "+" opens the destination preview instead of redirecting. */
+export function previewUrl(shortUrl: string): string {
+  return shortUrl ? `${shortUrl.replace(/\/$/, '')}+` : ''
+}
+
 /** Fix a missing slash in an otherwise explicit HTTP(S) scheme. */
 export function normalizeDestination(destination: string): string {
   // Do not normalize control characters or backslashes away before validation.
