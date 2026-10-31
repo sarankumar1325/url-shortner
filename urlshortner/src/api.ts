@@ -617,3 +617,105 @@ export function createAbuseReport(
 export function isProblem(error: unknown): error is ApiError {
   return error instanceof ApiError
 }
+
+export type AliasAvailability = {
+  alias: string
+  available: boolean
+  reason: 'taken' | 'reserved' | 'invalid' | null
+  message: string
+  source?: 'cache' | 'database'
+}
+
+export function checkAlias(
+  alias: string,
+  signal: AbortSignal,
+): Promise<AliasAvailability> {
+  return request<AliasAvailability>(
+    `/api/v1/links/availability?alias=${encodeURIComponent(alias)}`,
+    { signal },
+  )
+}
+
+export type TopLink = {
+  short_code: string
+  short_url: string
+  long_url: string
+  clicks: number
+}
+
+export type TopLinks = {
+  days: number
+  links: TopLink[]
+  generated_at: string
+  cached: boolean
+  ttl_seconds: number
+}
+
+export function getTopLinks(
+  workspaceId: string,
+  days: 1 | 7 | 30,
+  signal: AbortSignal,
+): Promise<TopLinks> {
+  return request<TopLinks>(`/api/v1/links/top?days=${days}&limit=5`, {
+    access: { workspaceId },
+    signal,
+  })
+}
+
+type Probe = { ok: boolean; latency_ms: number; error: string | null }
+type Flight = { leaders: number; shared: number; in_flight: number }
+
+export type SystemStatus = {
+  instance: {
+    started_at: string
+    uptime_seconds: number
+    consumer: string
+    environment: string
+  }
+  dependencies: { postgres: Probe; redis: Probe }
+  circuit_breaker: {
+    name: string
+    state: 'closed' | 'open' | 'half_open'
+    consecutive_failures: number
+    failure_threshold: number
+    reset_after_seconds: number
+    retry_in_seconds: number | null
+    calls: number
+    failures: number
+    rejected: number
+    times_opened: number
+    last_failure: string | null
+  }
+  redirect_cache: {
+    ttl_seconds: number
+    hits: number
+    misses: number
+    hit_ratio: number | null
+    single_flight: Flight
+  }
+  leaderboard_cache: {
+    ttl_seconds: number
+    hits: number
+    misses: number
+    single_flight: Flight
+  }
+  rate_limits: {
+    allowed: number
+    blocked: number
+    fail_open: number
+    fail_closed: number
+  }
+  analytics_stream: {
+    redis_ok: boolean
+    stream_depth: number | null
+    pending: number | null
+    lag: number | null
+    oldest_pending_age_seconds: number | null
+    dead_letter_depth: number | null
+    generated_at: string
+  }
+}
+
+export function getSystemStatus(signal: AbortSignal): Promise<SystemStatus> {
+  return request<SystemStatus>('/api/v1/system/status', { signal })
+}
