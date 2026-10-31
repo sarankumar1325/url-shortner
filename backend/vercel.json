@@ -1,0 +1,14 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "crons": [
+    {
+      "path": "/internal/analytics/drain",
+      "schedule": "0 3 * * *"
+    },
+    {
+      "path": "/internal/maintenance",
+      "schedule": "30 3 * * *"
+    }
+  ],
+  "framework": "fastapi"
+}
