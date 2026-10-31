@@ -106,6 +106,8 @@ Suggested goals (not benchmarks): warm redirect p95 <100 ms, create p95 <400 ms,
 
 ## Reading map
 
+**Showcase:** [system design techniques, live signals and the QR studio](system-design.md).
+
 **Backend:** [architecture](backend/architecture.md), [API](backend/api.md), [data model](backend/data-model.md), [codes/validation](backend/short-links.md), [cache/capacity](backend/caching-and-scale.md), [analytics](backend/analytics.md), [security](backend/security.md), [observability](backend/observability.md), [deployment](backend/deployment.md).
 
 **Frontend:** [architecture](frontend/architecture.md), [data fetching](frontend/data-fetching.md), [UI/accessibility](frontend/ui-and-a11y.md), [performance](frontend/performance.md), [deployment](frontend/deployment.md).

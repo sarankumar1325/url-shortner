@@ -97,12 +97,15 @@ For public unauthenticated resolution: missing/deleted/blocked/inactive → `404
 | --- | --- | --- |
 | POST | `/api/v1/links` | `201` creation; token only for legacy unowned links |
 | GET | `/api/v1/links` | `200` workspace links with `clicks_30d` |
+| GET | `/api/v1/links/availability?alias=` | `200` whether a custom alias is free, with `reason` `invalid`/`reserved`/`taken`; public, rate limited per IP |
+| GET | `/api/v1/links/top?days=&limit=` | `200` most-clicked workspace links over 1, 7 or 30 days; cached 60 seconds |
 | GET | `/api/v1/links/{code}` | `200` metadata; workspace, token or public access |
 | PATCH | `/api/v1/links/{code}` | `200` updated metadata |
 | DELETE | `/api/v1/links/{code}` | `204`; repeatable with a valid legacy token |
 | GET | `/api/v1/links/{code}/analytics` | `200` private totals/series/breakdowns |
 | GET / HEAD | `/{code}` | `302`, `404` or `410`; HEAD never counts a click; browsers (`Accept: text/html`) get an HTML page for `404`/`410` |
 | GET | `/{code}+` | `200` HTML destination preview (Peek), or an HTML `404`/`410` page; never counts a click |
+| GET | `/api/v1/system/status` | `200` per-instance probes, circuit breaker, cache and rate-limit counters; signed-in users only |
 | GET | `/health` | Dependency-free liveness |
 | GET | `/ready` | Dependency readiness; `503` if required service unavailable |
 | GET | `/internal/analytics/drain` | Cron-authenticated ingestion; no public data |
