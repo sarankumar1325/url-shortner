@@ -101,7 +101,8 @@ For public unauthenticated resolution: missing/deleted/blocked/inactive → `404
 | PATCH | `/api/v1/links/{code}` | `200` updated metadata |
 | DELETE | `/api/v1/links/{code}` | `204`; repeatable with a valid legacy token |
 | GET | `/api/v1/links/{code}/analytics` | `200` private totals/series/breakdowns |
-| GET / HEAD | `/{code}` | `302`, `404` or `410`; HEAD never counts a click |
+| GET / HEAD | `/{code}` | `302`, `404` or `410`; HEAD never counts a click; browsers (`Accept: text/html`) get an HTML page for `404`/`410` |
+| GET | `/{code}+` | `200` HTML destination preview (Peek), or an HTML `404`/`410` page; never counts a click |
 | GET | `/health` | Dependency-free liveness |
 | GET | `/ready` | Dependency readiness; `503` if required service unavailable |
 | GET | `/internal/analytics/drain` | Cron-authenticated ingestion; no public data |
@@ -376,6 +377,10 @@ Both routes require `Authorization: Bearer <CRON_SECRET>` and return `503 depend
 ## Redirects
 
 GET resolves state, awaits a bounded enqueue attempt, and emits `302` with Location, `no-store`, `X-Robots-Tag: noindex, nofollow` and `Referrer-Policy: no-referrer`. HEAD emits identical status/headers but no body/event. Other methods return `405` and never record a click. Redirects never require a session and never expose workspace membership.
+
+When a `404` or `410` request accepts `text/html`, the response is an escaped, self-contained HTML page with the same status, `no-store`, `noindex`, `nosniff` and a `default-src 'none'` CSP; other clients keep Problem Details. Unavailable pages do not distinguish missing, deleted, blocked and paused links.
+
+`GET /{code}+` (Peek) resolves the link through the same cache and rate limit as redirects, records no click, and renders the destination host, full URL, expiry and offline address signals (plain HTTP, raw IP, punycode host, known third-party shortener, non-default port). It never fetches the destination. Its Continue button points at `/{code}`, so the visit is counted and current link state applies. Pages link to the web app's abuse form using `WEB_BASE_URL`, or the first `CORS_ORIGINS` entry when it is unset.
 
 `302` avoids permanent browser redirect caching; it does not make click analytics exact. Crawlers, previews, transport failures and event loss still affect counts. HTML error pages must escape all content; API clients get Problem Details.
 
