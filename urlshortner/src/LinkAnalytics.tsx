@@ -20,7 +20,7 @@ function formatUtc(value: string): string {
   })
 }
 
-function Breakdown({
+export function Breakdown({
   title,
   entries,
   total,

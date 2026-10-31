@@ -457,10 +457,6 @@ export function parseTags(input: string): {
   return { tags: tags.slice(0, MAX_TAGS), invalid, error }
 }
 
-export function qrFileName(code: string): string {
-  return `shortly-${code}.png`
-}
-
 function csvField(value: string | number | null): string {
   const text = value === null ? '' : String(value)
   return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text

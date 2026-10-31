@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import {
   Activity,
+  BarChart3,
   ChevronsUpDown,
   CircleHelp,
   LayoutGrid,
@@ -24,6 +25,7 @@ type NavItem = { to: string; label: string; icon: LucideIcon; end?: boolean }
 
 const WORKSPACE_ITEMS: NavItem[] = [
   { to: '/', label: 'Overview', icon: LayoutGrid, end: true },
+  { to: '/dashboard', label: 'Dashboard', icon: BarChart3 },
   { to: '/links', label: 'Your links', icon: Link2 },
   { to: '/qr', label: 'QR studio', icon: QrCode },
   { to: '/members', label: 'People', icon: Users },
@@ -200,13 +202,10 @@ export default function Sidebar({
             className="new-link-button"
             onClick={onNewLink}
             aria-label={rail ? 'Create a link' : undefined}
-            data-tip={rail ? 'Create a link  N' : undefined}
+            data-tip={rail ? 'Create a link' : undefined}
           >
             <Plus size={18} />
             <span className="nav-label">Create a link</span>
-            <kbd className="nav-kbd" aria-hidden="true">
-              N
-            </kbd>
           </button>
         )}
 

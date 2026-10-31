@@ -29,7 +29,6 @@ import {
   Monitor,
   Moon,
   Plus,
-  QrCode,
   ShieldCheck,
   SlidersHorizontal,
   Sun,
@@ -83,7 +82,6 @@ import {
   normalizeDestination,
   parseTags,
   previewUrl,
-  qrFileName,
   recordFromMetadata,
   statusClass,
   titleFor,
@@ -109,8 +107,11 @@ const LinkAnalytics = lazy(() => import('./LinkAnalytics'))
 const SettingsPage = lazy(() => import('./SettingsPage'))
 const QrStudio = lazy(() => import('./QrStudio'))
 const SystemDesign = lazy(() => import('./SystemDesign'))
+const Dashboard = lazy(() => import('./Dashboard'))
+const LinkQrPreview = lazy(() => import('./LinkQrPreview'))
 
 const ROUTE_TITLES: [string, string, string][] = [
+  ['/dashboard', 'Dashboard', 'Dashboard'],
   ['/links', 'Your links', 'Your links'],
   ['/qr', 'QR studio', 'QR studio'],
   ['/members', 'People', 'People'],
@@ -778,7 +779,6 @@ function DetailPage({
   const [busyActive, setBusyActive] = useState(false)
   const [busyDelete, setBusyDelete] = useState(false)
   const [busyTags, setBusyTags] = useState(false)
-  const [busyQr, setBusyQr] = useState(false)
   const [tagInput, setTagInput] = useState('')
   const [tagError, setTagError] = useState<string | null>(null)
   const [fallbackInput, setFallbackInput] = useState('')
@@ -926,28 +926,6 @@ function DetailPage({
     }
   }
 
-  async function downloadQr() {
-    if (!link?.shortUrl) return
-    setBusyQr(true)
-    try {
-      const { toDataURL } = await import('qrcode')
-      const dataUrl = await toDataURL(link.shortUrl, {
-        width: 640,
-        margin: 2,
-        color: { dark: '#111111', light: '#ffffff' },
-      })
-      const anchor = document.createElement('a')
-      anchor.href = dataUrl
-      anchor.download = qrFileName(link.code)
-      anchor.click()
-      notify('QR code downloaded.')
-    } catch {
-      notify('The QR code could not be generated.')
-    } finally {
-      setBusyQr(false)
-    }
-  }
-
   async function remove() {
     if (!link) return
     setBusyDelete(true)
@@ -1081,21 +1059,13 @@ function DetailPage({
           >
             <Eye size={15} /> Copy preview link
           </button>
-          <button
-            type="button"
-            className="secondary-button"
-            onClick={() => void downloadQr()}
-            disabled={!link.shortUrl || busyQr}
-          >
-            {busyQr ? (
-              <LoaderCircle size={15} className="spin" />
-            ) : (
-              <QrCode size={15} />
-            )}
-            QR code
-          </button>
         </div>
       </section>
+      {link.shortUrl && (
+        <Suspense fallback={null}>
+          <LinkQrPreview code={link.code} shortUrl={link.shortUrl} notify={notify} />
+        </Suspense>
+      )}
       {link.analytics ? (
         <Suspense
           fallback={
@@ -2018,12 +1988,29 @@ function WorkspaceShell() {
               }
             />
             <Route
+              path="/dashboard"
+              element={
+                <Suspense fallback={<PageLoading label="Loading dashboard…" />}>
+                  <Dashboard
+                    key={workspaceId}
+                    workspaceId={workspaceId}
+                    workspaceName={workspaceName}
+                  />
+                </Suspense>
+              }
+            />
+            <Route
               path="/system"
               element={
                 <Suspense
                   fallback={<PageLoading label="Loading system design…" />}
                 >
-                  <SystemDesign />
+                  <SystemDesign
+                    key={workspaceId}
+                    workspaceId={workspaceId}
+                    links={links}
+                    loading={listLoading}
+                  />
                 </Suspense>
               }
             />
