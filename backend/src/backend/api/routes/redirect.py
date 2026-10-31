@@ -11,7 +11,7 @@ from backend.core.problems import APIError
 from backend.core.redis import RedisError, command
 from backend.services import analytics as analytics_service
 from backend.services import links as links_service
-from backend.services import ratelimit
+from backend.services import ratelimit, visitor_pages
 
 router = APIRouter(tags=["redirects"])
 
@@ -80,12 +80,11 @@ async def resolve_redirect(code: str, session: AsyncSession) -> dict:
     return entry
 
 
-@router.get("/{code}", summary="Redirect to the destination")
-async def redirect(
-    code: str,
-    request: Request,
-    session: AsyncSession = Depends(get_api_session),
-) -> Response:
+def _wants_html(request: Request) -> bool:
+    return "text/html" in request.headers.get("accept", "").lower()
+
+
+async def _enforce_redirect_limit(request: Request) -> None:
     allowed, retry_after = await ratelimit.check_rate_limit(
         f"redirect:{_client_ip(request)}", 600, fail_open=True
     )
@@ -94,7 +93,38 @@ async def redirect(
             429, "rate_limited", "Too many requests.", headers={"Retry-After": str(retry_after)}
         )
 
-    entry = await resolve_redirect(code, session)
+
+# Registered before /{code}: that pattern would otherwise match "abc12+" too.
+@router.get("/{code}+", summary="Preview the destination without visiting it")
+async def preview(
+    code: str,
+    request: Request,
+    session: AsyncSession = Depends(get_api_session),
+) -> Response:
+    await _enforce_redirect_limit(request)
+    try:
+        entry = await resolve_redirect(code, session)
+    except APIError as exc:
+        if exc.status in (404, 410):
+            return visitor_pages.unavailable_response(code, exc.status)
+        raise
+    return visitor_pages.preview_response(code, entry["long_url"], entry.get("expires_at"))
+
+
+@router.get("/{code}", summary="Redirect to the destination")
+async def redirect(
+    code: str,
+    request: Request,
+    session: AsyncSession = Depends(get_api_session),
+) -> Response:
+    await _enforce_redirect_limit(request)
+
+    try:
+        entry = await resolve_redirect(code, session)
+    except APIError as exc:
+        if exc.status in (404, 410) and _wants_html(request):
+            return visitor_pages.unavailable_response(code, exc.status)
+        raise
 
     await analytics_service.record_click(
         url_id=entry["url_id"],

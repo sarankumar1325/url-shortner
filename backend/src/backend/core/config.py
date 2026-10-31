@@ -30,6 +30,8 @@ class Settings(BaseSettings):
 
     short_base_url: str = "http://localhost:8000"
     cors_origins: list[str] = ["http://localhost:5173"]
+    # Web app origin for links on visitor pages; falls back to the first CORS origin.
+    web_base_url: str = ""
     # Hostnames (and their subdomains) that may never be link destinations.
     # The short host itself is always rejected to prevent redirect loops.
     blocked_hosts: list[str] = []
