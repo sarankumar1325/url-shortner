@@ -50,6 +50,9 @@ def _serialize(
         "created_at": _iso(url.created_at),
         "updated_at": _iso(url.updated_at),
         "tags": tags or [],
+        "fallback_url": url.fallback_url,
+        "max_clicks": url.max_clicks,
+        "clicks_used": url.clicks_used or 0,
     }
     if token is not None:
         body["management_token"] = token
@@ -69,6 +72,8 @@ class CreateLinkRequest(BaseModel):
     custom_alias: str | None = None
     expires_at: datetime | None = None
     tags: list[str] | None = None
+    fallback_url: str | None = None
+    max_clicks: int | None = None
 
 
 class UpdateLinkRequest(BaseModel):
@@ -78,6 +83,8 @@ class UpdateLinkRequest(BaseModel):
     expires_at: datetime | None = None
     is_active: bool | None = None
     tags: list[str] | None = None
+    fallback_url: str | None = None
+    max_clicks: int | None = None
 
 
 @router.post(
@@ -116,6 +123,8 @@ async def create_link(
         workspace_id=context.workspace.id if context else None,
         created_by_user_id=context.user.id if context else None,
         tags=payload.tags,
+        fallback_url=payload.fallback_url,
+        max_clicks=payload.max_clicks,
     )
     return JSONResponse(
         status_code=201,
@@ -188,6 +197,7 @@ async def update_link(
     # Null expiry clears it; omitting the field preserves it. Tags follow the
     # same contract: an omitted field preserves them, null clears them.
     clear_expiry = "expires_at" in payload.model_fields_set and payload.expires_at is None
+    fields = payload.model_fields_set
     url = await links_service.update_link(
         session,
         url,
@@ -197,6 +207,10 @@ async def update_link(
         clear_expiry=clear_expiry,
         replace_tags=replace_tags,
         tags=payload.tags,
+        fallback_url=payload.fallback_url,
+        clear_fallback="fallback_url" in fields and payload.fallback_url is None,
+        max_clicks=payload.max_clicks,
+        clear_max_clicks="max_clicks" in fields and payload.max_clicks is None,
     )
     await invalidate_cache(code)
     tags = await links_service.tags_for_url(session, url.id) if context is not None else []

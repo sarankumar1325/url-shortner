@@ -5,7 +5,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlsplit
 
-from sqlalchemy import and_, delete, func, select, update
+from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +21,7 @@ from backend.core.security import (
     verify_management_token,
 )
 from backend.models import ClickDaily, CreateRequest, Url, UrlTag
+from backend.services.analytics import classify_device
 from backend.services.validation import (
     RESERVED_SEGMENTS,
     normalize_tags,
@@ -29,6 +30,9 @@ from backend.services.validation import (
 )
 
 CODE_RETRY_LIMIT = 5
+MAX_CLICKS_LIMIT = 1_000_000
+# Link unfurlers that classify_device does not flag; they must not use up a visit.
+PREVIEWER_MARKERS = ("whatsapp", "skypeuripreview", "vkshare")
 
 
 def _now() -> datetime:
@@ -48,20 +52,56 @@ def _validate_destination(long_url: str) -> str:
     )
 
 
+def _validate_fallback(fallback_url: str | None) -> str | None:
+    if fallback_url is None:
+        return None
+    try:
+        return _validate_destination(fallback_url)
+    except APIError as exc:
+        message = exc.detail.replace("The destination", "The fallback")
+        raise APIError(
+            exc.status,
+            exc.code,
+            message,
+            errors=[{"field": "fallback_url", "code": exc.code, "message": message}],
+        ) from None
+
+
+def _validate_max_clicks(max_clicks: int | None) -> int | None:
+    if max_clicks is None:
+        return None
+    if not 1 <= max_clicks <= MAX_CLICKS_LIMIT:
+        message = f"Visit limits must be between 1 and {MAX_CLICKS_LIMIT:,}."
+        raise APIError(
+            422,
+            "validation_error",
+            message,
+            errors=[{"field": "max_clicks", "code": "out_of_range", "message": message}],
+        )
+    return max_clicks
+
+
 def _canonical_request(
-    long_url: str, custom_alias: str | None, expires_at: str | None, tags: list[str]
+    long_url: str,
+    custom_alias: str | None,
+    expires_at: str | None,
+    tags: list[str],
+    fallback_url: str | None = None,
+    max_clicks: int | None = None,
 ) -> bytes:
     # Only validated, canonical input is hashed — never raw client bytes.
-    return json.dumps(
-        {
-            "long_url": long_url,
-            "custom_alias": custom_alias,
-            "expires_at": expires_at,
-            "tags": tags,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
+    body: dict = {
+        "long_url": long_url,
+        "custom_alias": custom_alias,
+        "expires_at": expires_at,
+        "tags": tags,
+    }
+    # Omitted when unset so requests from before these fields keep their hash.
+    if fallback_url is not None:
+        body["fallback_url"] = fallback_url
+    if max_clicks is not None:
+        body["max_clicks"] = max_clicks
+    return json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
 
 
 def _validate_expiry(expires_at: datetime | None) -> datetime | None:
@@ -83,6 +123,8 @@ async def _insert_url(
     token_hash: bytes | None,
     workspace_id: uuid.UUID | None,
     created_by_user_id: uuid.UUID | None,
+    fallback_url: str | None = None,
+    max_clicks: int | None = None,
 ) -> Url:
     for _ in range(CODE_RETRY_LIMIT):
         code = custom_alias
@@ -101,6 +143,8 @@ async def _insert_url(
                 expires_at=expires_at,
                 workspace_id=workspace_id,
                 created_by_user_id=created_by_user_id,
+                fallback_url=fallback_url,
+                max_clicks=max_clicks,
             )
             .on_conflict_do_nothing(index_elements=["short_code"])
             .returning(Url)
@@ -135,6 +179,8 @@ async def create_link(
     workspace_id: uuid.UUID | None = None,
     created_by_user_id: uuid.UUID | None = None,
     tags: list[str] | None = None,
+    fallback_url: str | None = None,
+    max_clicks: int | None = None,
 ) -> dict:
     """Create a link with atomic idempotency replay storage.
 
@@ -147,6 +193,8 @@ async def create_link(
     if custom_alias is not None:
         custom_alias = validate_custom_alias(custom_alias)
     expires_at = _validate_expiry(expires_at)
+    fallback_url = _validate_fallback(fallback_url)
+    max_clicks = _validate_max_clicks(max_clicks)
     tags = normalize_tags(tags)
     if tags and workspace_id is None:
         raise APIError(
@@ -165,7 +213,10 @@ async def create_link(
     scope = workspace_id.bytes if workspace_id is not None else b""
     key_hash = sha256(idempotency_key.bytes + scope)
     expires_iso = expires_at.isoformat().replace("+00:00", "Z") if expires_at else None
-    request_hash = sha256(_canonical_request(long_url, custom_alias, expires_iso, tags) + scope)
+    request_hash = sha256(
+        _canonical_request(long_url, custom_alias, expires_iso, tags, fallback_url, max_clicks)
+        + scope
+    )
 
     # Fast path: replay an existing completed request.
     existing = await session.get(CreateRequest, key_hash)
@@ -232,6 +283,8 @@ async def create_link(
         token_hash,
         workspace_id,
         created_by_user_id,
+        fallback_url,
+        max_clicks,
     )
     await _insert_tags(session, url.id, tags)
     response = response_builder(url, token, tags=tags)
@@ -366,9 +419,23 @@ async def update_link(
     clear_expiry: bool,
     replace_tags: bool = False,
     tags: list[str] | None = None,
+    fallback_url: str | None = None,
+    clear_fallback: bool = False,
+    max_clicks: int | None = None,
+    clear_max_clicks: bool = False,
 ) -> Url:
     if long_url is not None:
         url.long_url = _validate_destination(long_url)
+    if clear_fallback:
+        url.fallback_url = None
+    elif fallback_url is not None:
+        url.fallback_url = _validate_fallback(fallback_url)
+    if clear_max_clicks:
+        # Removing the limit restarts the count if a limit is added later.
+        url.max_clicks = None
+        url.clicks_used = 0
+    elif max_clicks is not None:
+        url.max_clicks = _validate_max_clicks(max_clicks)
     if clear_expiry:
         url.expires_at = None
     elif expires_at is not None:
@@ -383,6 +450,40 @@ async def update_link(
     await session.commit()
     await session.refresh(url)
     return url
+
+
+def is_link_previewer(user_agent: str | None) -> bool:
+    if classify_device(user_agent)[1]:
+        return True
+    ua = (user_agent or "").lower()
+    return any(marker in ua for marker in PREVIEWER_MARKERS)
+
+
+async def consume_visit(session: AsyncSession, url_id: int, *, count: bool) -> bool:
+    """Atomically use one visit of a capped link; False once the limit is reached.
+
+    With count=False the remaining allowance is only checked, for previews,
+    HEAD requests and link unfurlers.
+    """
+    remaining = or_(Url.max_clicks.is_(None), Url.clicks_used < Url.max_clicks)
+    if not count:
+        result = await session.execute(select(Url.id).where(Url.id == url_id, remaining))
+        return result.scalar_one_or_none() is not None
+    result = await session.execute(
+        update(Url)
+        .where(Url.id == url_id, remaining)
+        .values(
+            clicks_used=case(
+                (Url.max_clicks.is_(None), Url.clicks_used), else_=Url.clicks_used + 1
+            ),
+            # Keep updated_at meaning "edited by a person", not "visited".
+            updated_at=Url.updated_at,
+        )
+        .returning(Url.id)
+    )
+    allowed = result.scalar_one_or_none() is not None
+    await session.commit()
+    return allowed
 
 
 async def delete_link(session: AsyncSession, url: Url) -> None:

@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     Identity,
     Index,
+    Integer,
     LargeBinary,
     SmallInteger,
     String,
@@ -178,6 +179,10 @@ class Url(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_blocked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Where visitors go once the link has expired or used up its visit limit.
+    fallback_url: Mapped[str | None] = mapped_column(Text)
+    max_clicks: Mapped[int | None] = mapped_column(Integer)
+    clicks_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -206,6 +211,15 @@ class Url(Base):
             name="management_scope",
         ),
         CheckConstraint("expires_at IS NULL OR expires_at > created_at"),
+        CheckConstraint(
+            "fallback_url IS NULL OR char_length(fallback_url) BETWEEN 1 AND 8192",
+            name="urls_fallback_url_length",
+        ),
+        CheckConstraint(
+            "max_clicks IS NULL OR max_clicks BETWEEN 1 AND 1000000",
+            name="urls_max_clicks_range",
+        ),
+        CheckConstraint("clicks_used >= 0", name="urls_clicks_used_nonnegative"),
         Index("urls_workspace_created_idx", "workspace_id", "created_at"),
     )
 

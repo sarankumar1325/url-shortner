@@ -144,9 +144,15 @@ def _format_expiry(expires_at: str | None) -> str | None:
     return moment.strftime("%d %b %Y, %H:%M UTC")
 
 
-def unavailable_response(code: str, status: int) -> HTMLResponse:
+def unavailable_response(code: str, status: int, reason: str = "") -> HTMLResponse:
     shown = escape(_display_code(code))
-    if status == 410:
+    if reason == "link_exhausted":
+        title = "This link has been used up"
+        message = (
+            f"The short link <code>{shown}</code> allowed a limited number of visits, and "
+            "they have all been used. Ask the person who shared it for a new link."
+        )
+    elif status == 410:
         title = "This link has expired"
         message = (
             f"The short link <code>{shown}</code> reached its expiry date and no longer "
@@ -165,7 +171,14 @@ def unavailable_response(code: str, status: int) -> HTMLResponse:
     return HTMLResponse(_page(title, body), status_code=status, headers=PAGE_HEADERS)
 
 
-def preview_response(code: str, long_url: str, expires_at: str | None) -> HTMLResponse:
+def preview_response(
+    code: str,
+    long_url: str,
+    expires_at: str | None,
+    *,
+    via_fallback: bool = False,
+    limited: bool = False,
+) -> HTMLResponse:
     parts = urlsplit(long_url)
     host = (parts.hostname or long_url).removeprefix("www.")
     signals = destination_signals(long_url)
@@ -181,13 +194,21 @@ def preview_response(code: str, long_url: str, expires_at: str | None) -> HTMLRe
             "address only, not the page content.</p>"
         )
     expiry = _format_expiry(expires_at)
-    expiry_note = f"<p>This link expires {escape(expiry)}.</p>" if expiry else ""
+    if via_fallback:
+        notes = (
+            "<p>The original link is no longer active, so it now leads to the "
+            "fallback page its owner chose.</p>"
+        )
+    else:
+        notes = f"<p>This link expires {escape(expiry)}.</p>" if expiry else ""
+        if limited:
+            notes += "<p>This is a limited-use link. Opening it uses one of its visits.</p>"
     report = _report_link(code)
     body = (
         f"<h1>Before you go</h1><p>This short link leads to</p>"
         f'<p class="host">{escape(host)}</p>'
         f'<p class="label">Full address</p><p class="url">{escape(long_url)}</p>'
-        f"{checks}{expiry_note}"
+        f"{checks}{notes}"
         f'<div class="actions"><a class="button" href="/{quote(code, safe="")}" '
         f'rel="noreferrer">Continue to {escape(host)}</a>{report}</div>'
     )

@@ -57,27 +57,47 @@ async def invalidate_cache(code: str) -> None:
         pass
 
 
-async def resolve_redirect(code: str, session: AsyncSession) -> dict:
-    """Positive cache of {url_id, long_url, expires_at}. Entries are only
-    written for live links; mutations may take up to the cache TTL to land."""
-    cached = await _cache_get(code)
-    if cached is not None:
-        if cached.get("expires_at") and datetime.fromisoformat(
-            cached["expires_at"]
-        ) <= datetime.now(UTC):
-            raise APIError(410, "link_expired", "This link has expired.")
-        return cached
+def fallback_or_gone(entry: dict, code: str, detail: str) -> dict:
+    """Send visitors to the fallback destination, or answer 410 without one."""
+    if entry.get("fallback_url"):
+        return {**entry, "long_url": entry["fallback_url"], "via_fallback": True}
+    raise APIError(410, code, detail)
 
-    url, state = await links_service.resolve_public(session, code)
-    if state == "expired":
-        raise APIError(410, "link_expired", "This link has expired.")
-    entry = {
-        "url_id": url.id,
-        "long_url": url.long_url,
-        "expires_at": url.expires_at.isoformat() if url.expires_at else None,
-    }
-    await _cache_set(code, entry)
+
+def _expired(entry: dict) -> bool:
+    expires_at = entry.get("expires_at")
+    return bool(expires_at) and datetime.fromisoformat(expires_at) <= datetime.now(UTC)
+
+
+async def resolve_redirect(code: str, session: AsyncSession) -> dict:
+    """Positive cache of {url_id, long_url, expires_at, fallback_url, max_clicks}.
+
+    Entries are only written for live links; mutations may take up to the
+    cache TTL to land. Visit limits are enforced separately against Postgres.
+    """
+    entry = await _cache_get(code)
+    if entry is None:
+        url, state = await links_service.resolve_public(session, code)
+        entry = {
+            "url_id": url.id,
+            "long_url": url.long_url,
+            "expires_at": url.expires_at.isoformat() if url.expires_at else None,
+            "fallback_url": url.fallback_url,
+            "max_clicks": url.max_clicks,
+        }
+        if state != "expired":
+            await _cache_set(code, entry)
+    if _expired(entry):
+        return fallback_or_gone(entry, "link_expired", "This link has expired.")
     return entry
+
+
+async def apply_visit_limit(entry: dict, code: str, session: AsyncSession, *, count: bool) -> dict:
+    if not entry.get("max_clicks") or entry.get("via_fallback"):
+        return entry
+    if await links_service.consume_visit(session, entry["url_id"], count=count):
+        return entry
+    return fallback_or_gone(entry, "link_exhausted", "This link has reached its visit limit.")
 
 
 def _wants_html(request: Request) -> bool:
@@ -104,11 +124,18 @@ async def preview(
     await _enforce_redirect_limit(request)
     try:
         entry = await resolve_redirect(code, session)
+        entry = await apply_visit_limit(entry, code, session, count=False)
     except APIError as exc:
         if exc.status in (404, 410):
-            return visitor_pages.unavailable_response(code, exc.status)
+            return visitor_pages.unavailable_response(code, exc.status, exc.code)
         raise
-    return visitor_pages.preview_response(code, entry["long_url"], entry.get("expires_at"))
+    return visitor_pages.preview_response(
+        code,
+        entry["long_url"],
+        entry.get("expires_at"),
+        via_fallback=bool(entry.get("via_fallback")),
+        limited=bool(entry.get("max_clicks")),
+    )
 
 
 @router.get("/{code}", summary="Redirect to the destination")
@@ -119,11 +146,15 @@ async def redirect(
 ) -> Response:
     await _enforce_redirect_limit(request)
 
+    user_agent = request.headers.get("user-agent")
     try:
         entry = await resolve_redirect(code, session)
+        entry = await apply_visit_limit(
+            entry, code, session, count=not links_service.is_link_previewer(user_agent)
+        )
     except APIError as exc:
         if exc.status in (404, 410) and _wants_html(request):
-            return visitor_pages.unavailable_response(code, exc.status)
+            return visitor_pages.unavailable_response(code, exc.status, exc.code)
         raise
 
     await analytics_service.record_click(
@@ -132,7 +163,7 @@ async def redirect(
         clicked_at=datetime.now(UTC),
         referer=request.headers.get("referer"),
         country=request.headers.get("x-vercel-ip-country"),
-        user_agent=request.headers.get("user-agent"),
+        user_agent=user_agent,
     )
 
     return Response(
@@ -152,6 +183,7 @@ async def redirect_head(
     session: AsyncSession = Depends(get_api_session),
 ) -> Response:
     entry = await resolve_redirect(code, session)
+    entry = await apply_visit_limit(entry, code, session, count=False)
     return Response(
         status_code=302,
         headers={
