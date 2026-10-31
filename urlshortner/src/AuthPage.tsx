@@ -37,7 +37,9 @@ export function BrandMark() {
           strokeLinecap="round"
         />
       </svg>
-      shortly<span className="brand-period">.</span>
+      <span className="brand-word">
+        shortly<span className="brand-period">.</span>
+      </span>
     </span>
   )
 }

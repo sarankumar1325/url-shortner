@@ -12,6 +12,7 @@ describe('keyboard shortcuts', () => {
     expect(shortcutFor(press('N'))).toBe('new-link')
     expect(shortcutFor(press('/'))).toBe('search')
     expect(shortcutFor(press('?'))).toBe('help')
+    expect(shortcutFor(press('['))).toBe('toggle-sidebar')
     expect(shortcutFor(press('x'))).toBeNull()
   })
 

@@ -22,7 +22,6 @@ import {
   Flag,
   Globe2,
   Keyboard,
-  LayoutGrid,
   Link2,
   LoaderCircle,
   LogOut,
@@ -31,7 +30,6 @@ import {
   Moon,
   Plus,
   QrCode,
-  Settings as SettingsIcon,
   ShieldCheck,
   SlidersHorizontal,
   Sun,
@@ -42,7 +40,6 @@ import {
 import {
   BrowserRouter,
   Link,
-  NavLink,
   Navigate,
   Route,
   Routes,
@@ -97,24 +94,45 @@ import {
   type LinkRecord,
 } from './links'
 import { shortcutFor } from './shortcuts'
+import { useAliasAvailability } from './aliasAvailability'
+import TopLinks from './TopLinks'
+import Sidebar from './Sidebar'
+import {
+  readSidebarCollapsed,
+  useMediaQuery,
+  writeSidebarCollapsed,
+} from './layout'
 import './App.css'
 
 const MembersPage = lazy(() => import('./MembersPage'))
 const LinkAnalytics = lazy(() => import('./LinkAnalytics'))
 const SettingsPage = lazy(() => import('./SettingsPage'))
+const QrStudio = lazy(() => import('./QrStudio'))
+const SystemDesign = lazy(() => import('./SystemDesign'))
 
-const ROLE_LABEL: Record<WorkspaceRole, string> = {
-  owner: 'Owner',
-  admin: 'Admin',
-  member: 'Member',
-  viewer: 'Viewer',
+const ROUTE_TITLES: [string, string, string][] = [
+  ['/links', 'Your links', 'Your links'],
+  ['/qr', 'QR studio', 'QR studio'],
+  ['/members', 'People', 'People'],
+  ['/settings', 'Settings', 'Settings'],
+  ['/system', 'System design', 'System design'],
+]
+
+/** [document title, breadcrumb] for a workspace path. */
+function routeTitle(pathname: string): [string, string] {
+  if (pathname === '/') return ['Your workspace', 'Overview']
+  const match = ROUTE_TITLES.find(([path]) => path === pathname)
+  if (match) return [match[1], match[2]]
+  if (pathname.startsWith('/links/')) return ['Link details', 'Link details']
+  return ['Page not found', 'Not found']
 }
 
-const ROLE_NOTE: Record<WorkspaceRole, string> = {
-  owner: 'Full control of this workspace, its links, and its people.',
-  admin: 'Manage links, members, and invitations.',
-  member: 'Create and manage this workspace’s short links.',
-  viewer: 'Read links and analytics without changing anything.',
+function PageLoading({ label }: { label: string }) {
+  return (
+    <div className="loading-panel" role="status" aria-busy="true">
+      {label}
+    </div>
+  )
 }
 
 type Attempt = { key: string; body: CreateBody }
@@ -181,6 +199,7 @@ function CreateForm({
 }) {
   const [destination, setDestination] = useState('')
   const [alias, setAlias] = useState('')
+  const aliasState = useAliasAvailability(alias)
   const [expiry, setExpiry] = useState('')
   const [tagInput, setTagInput] = useState('')
   const [campaign, setCampaign] = useState({ source: '', medium: '', campaign: '' })
@@ -530,10 +549,27 @@ function CreateForm({
                 />
               </div>
               <p
-                className={errors.alias ? 'field-error' : 'field-hint'}
+                className={
+                  errors.alias || aliasState.status === 'unavailable'
+                    ? 'field-error'
+                    : `field-hint alias-${aliasState.status}`
+                }
                 id="alias-hint"
+                aria-live="polite"
               >
-                {errors.alias || '3–32 lowercase letters, numbers, _ or -.'}
+                {errors.alias ? (
+                  errors.alias
+                ) : aliasState.status === 'idle' ? (
+                  '3–32 lowercase letters, numbers, _ or -.'
+                ) : (
+                  <>
+                    {aliasState.status === 'checking' && (
+                      <LoaderCircle size={12} className="spin" />
+                    )}
+                    {aliasState.status === 'available' && <Check size={12} />}
+                    {aliasState.message}
+                  </>
+                )}
               </p>
             </div>
             <div>
@@ -1388,7 +1424,12 @@ function WorkspaceShell() {
       : 'light',
   )
   const [help, setHelp] = useState(false)
-  const [mobileNav, setMobileNav] = useState(false)
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  const [collapsed, setCollapsed] = useState(() =>
+    readSidebarCollapsed(window.localStorage),
+  )
+  const narrow = useMediaQuery('(max-width: 1050px)')
+  const menuButton = useRef<HTMLButtonElement>(null)
   const [notice, setNotice] = useState('')
   const [manualCopy, setManualCopy] = useState<string | null>(null)
   const [importOpen, setImportOpen] = useState(false)
@@ -1420,17 +1461,16 @@ function WorkspaceShell() {
   }, [])
 
   useEffect(() => {
-    const title = isHome
-      ? 'Your workspace'
-      : location.pathname === '/links'
-        ? 'Your links'
-        : location.pathname === '/members'
-          ? 'People'
-          : location.pathname === '/settings'
-            ? 'Settings'
-            : location.pathname.startsWith('/links/')
-              ? 'Link details'
-              : 'Page not found'
+    writeSidebarCollapsed(window.localStorage, collapsed)
+  }, [collapsed])
+
+  const closeDrawer = useCallback(() => {
+    setDrawerOpen(false)
+    menuButton.current?.focus()
+  }, [])
+
+  useEffect(() => {
+    const [title] = routeTitle(location.pathname)
     document.title = `${title} — Shortly`
     if (firstRoute.current) {
       firstRoute.current = false
@@ -1615,7 +1655,7 @@ function WorkspaceShell() {
 
   function newLink() {
     if (!canEdit) return
-    setMobileNav(false)
+    setDrawerOpen(false)
     setComposerVersion((version) => version + 1)
     if (!isHome) navigate('/')
     window.requestAnimationFrame(() =>
@@ -1640,7 +1680,7 @@ function WorkspaceShell() {
     if (id === workspaceId) return
     auth.selectWorkspace(id)
     setLinks([])
-    setMobileNav(false)
+    setDrawerOpen(false)
     if (!isHome) navigate('/')
   }
 
@@ -1675,6 +1715,10 @@ function WorkspaceShell() {
         if (!search) return
         event.preventDefault()
         search.focus()
+      } else if (action === 'toggle-sidebar') {
+        if (narrow) return
+        event.preventDefault()
+        setCollapsed((value) => !value)
       } else {
         event.preventDefault()
         setHelp(true)
@@ -1696,111 +1740,31 @@ function WorkspaceShell() {
     )
   }
 
-  const breadcrumb = isHome
-    ? 'Overview'
-    : location.pathname === '/links'
-      ? 'Your links'
-      : location.pathname === '/members'
-        ? 'People'
-        : location.pathname === '/settings'
-          ? 'Settings'
-          : 'Link details'
+  const [, breadcrumb] = routeTitle(location.pathname)
   const activeRole: WorkspaceRole = role
-  const activeUser = user
-
-  function navigation() {
-    return (
-      <>
-        <label className="workspace-switcher">
-          <span className="nav-section-label">Workspace</span>
-          <select
-            value={workspaceId}
-            onChange={(event) => switchWorkspace(event.target.value)}
-          >
-            {auth.session?.workspaces.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.name} · {ROLE_LABEL[item.role]}
-              </option>
-            ))}
-          </select>
-          <span className={`role-badge role-${activeRole}`}>
-            {ROLE_LABEL[activeRole]}
-          </span>
-        </label>
-        <nav aria-label="Workspace navigation">
-          <NavLink to="/" end onClick={() => setMobileNav(false)}>
-            <LayoutGrid size={18} strokeWidth={1.6} /> Overview
-          </NavLink>
-          <NavLink to="/links" end onClick={() => setMobileNav(false)}>
-            <Link2 size={18} strokeWidth={1.6} /> Your links
-          </NavLink>
-          <NavLink to="/members" onClick={() => setMobileNav(false)}>
-            <Users size={18} strokeWidth={1.6} /> People
-          </NavLink>
-          <NavLink to="/settings" onClick={() => setMobileNav(false)}>
-            <SettingsIcon size={18} strokeWidth={1.6} /> Settings
-          </NavLink>
-        </nav>
-        <div className="sidebar-note">
-          <ShieldCheck size={19} strokeWidth={1.4} />
-          <h3>{ROLE_LABEL[activeRole]} access</h3>
-          <p>{ROLE_NOTE[activeRole]}</p>
-        </div>
-      </>
-    )
-  }
-
-  function account() {
-    return (
-      <div className="account-card">
-        <span className="member-avatar" aria-hidden="true">
-          {(activeUser.display_name || activeUser.email)
-            .slice(0, 1)
-            .toUpperCase()}
-        </span>
-        <div className="account-identity">
-          <strong>{activeUser.display_name}</strong>
-          <span>{activeUser.email}</span>
-        </div>
-        <button
-          type="button"
-          className="icon-button"
-          aria-label="Sign out"
-          onClick={() => void signOut()}
-        >
-          <LogOut size={16} />
-        </button>
-      </div>
-    )
-  }
+  const rail = collapsed && !narrow
 
   return (
-    <div className="workspace">
+    <div className={`workspace${rail ? ' sidebar-collapsed' : ''}`}>
       <a className="skip-link" href="#main-content">
         Skip to content
       </a>
-      <aside className="sidebar">
-        <Link to="/" aria-label="Shortly home" className="brand-link">
-          <BrandMark />
-        </Link>
-        {canEdit && (
-          <button type="button" className="new-link-button" onClick={newLink}>
-            <Plus size={18} /> Create a link
-          </button>
-        )}
-        {navigation()}
-        <div className="sidebar-bottom">
-          <button
-            type="button"
-            className="sidebar-help"
-            onClick={() => setHelp(true)}
-          >
-            <CircleHelp size={17} /> A little help <ArrowUpRight size={14} />
-          </button>
-          {account()}
-          <span className="sidebar-footer">A smaller link. An open web.</span>
-        </div>
-      </aside>
+      <Sidebar
+        collapsed={collapsed}
+        narrow={narrow}
+        drawerOpen={narrow && drawerOpen}
+        workspaces={auth.session?.workspaces ?? []}
+        workspaceId={workspaceId}
+        role={activeRole}
+        user={user}
+        canEdit={canEdit}
+        onToggleCollapsed={() => setCollapsed((value) => !value)}
+        onCloseDrawer={closeDrawer}
+        onNewLink={newLink}
+        onSwitchWorkspace={switchWorkspace}
+        onHelp={() => setHelp(true)}
+        onSignOut={() => void signOut()}
+      />
       <div className="main-shell">
         <header className="workspace-header">
           <div className="mobile-brand">
@@ -1808,11 +1772,13 @@ function WorkspaceShell() {
               <BrandMark />
             </Link>
             <button
+              ref={menuButton}
               type="button"
               className="icon-button"
               aria-label="Open navigation"
-              aria-expanded={mobileNav}
-              onClick={() => setMobileNav(true)}
+              aria-controls="workspace-sidebar"
+              aria-expanded={narrow && drawerOpen}
+              onClick={() => setDrawerOpen(true)}
             >
               <Menu size={21} />
             </button>
@@ -1849,8 +1815,8 @@ function WorkspaceShell() {
                 <>
                   <div className="page-heading home-heading">
                     <h1 tabIndex={-1}>
-                      {activeUser.display_name
-                        ? `Less link, ${activeUser.display_name.split(' ')[0]}.`
+                      {user.display_name
+                        ? `Less link, ${user.display_name.split(' ')[0]}.`
                         : 'Less link. More possibility.'}
                     </h1>
                     <p>
@@ -1873,6 +1839,7 @@ function WorkspaceShell() {
                     )}
                     <AnalyticsTeaser link={featured} />
                   </div>
+                  <TopLinks workspaceId={workspaceId} />
                   {listLoading ? (
                     <div
                       className="loading-panel"
@@ -2036,6 +2003,30 @@ function WorkspaceShell() {
                 </Suspense>
               }
             />
+            <Route
+              path="/qr"
+              element={
+                <Suspense fallback={<PageLoading label="Loading QR studio…" />}>
+                  <QrStudio
+                    key={workspaceId}
+                    links={links}
+                    loading={listLoading}
+                    workspaceName={workspaceName}
+                    notify={setNotice}
+                  />
+                </Suspense>
+              }
+            />
+            <Route
+              path="/system"
+              element={
+                <Suspense
+                  fallback={<PageLoading label="Loading system design…" />}
+                >
+                  <SystemDesign />
+                </Suspense>
+              }
+            />
             <Route path="*" element={<NotFound />} />
           </Routes>
           <footer className="workspace-footer">
@@ -2143,7 +2134,7 @@ function WorkspaceShell() {
               <h3>Keyboard shortcuts</h3>
               <p>
                 <kbd>N</kbd> new link · <kbd>/</kbd> search links ·{' '}
-                <kbd>?</kbd> this help
+                <kbd>[</kbd> collapse sidebar · <kbd>?</kbd> this help
               </p>
             </div>
           </div>
@@ -2154,23 +2145,6 @@ function WorkspaceShell() {
           >
             Got it <ArrowRight size={16} />
           </button>
-        </Modal>
-      )}
-      {mobileNav && (
-        <Modal title="Your workspace" onClose={() => setMobileNav(false)}>
-          <div className="mobile-navigation">
-            {navigation()}
-            {canEdit && (
-              <button
-                type="button"
-                className="primary-button"
-                onClick={newLink}
-              >
-                <Plus size={17} /> Create a link
-              </button>
-            )}
-            {account()}
-          </div>
         </Modal>
       )}
       {importOpen && canEdit && (
