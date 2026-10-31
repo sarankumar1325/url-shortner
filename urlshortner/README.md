@@ -30,11 +30,10 @@ bun run lint   # oxlint
 
 | Variable | Purpose |
 | --- | --- |
-| `VITE_API_BASE_URL` | FastAPI base URL |
-| `VITE_SHORT_BASE_URL` | Public short-link origin |
+| `VITE_API_BASE_URL` | FastAPI base URL; the API's returned `short_url` is used for copying |
 
-Both values are public. Never put secrets in `VITE_*` variables.
+The value is public. Never put secrets in `VITE_*` variables.
 
 ## Design
 
-The current app is the initial Vite scaffold. The target architecture, routing, data fetching, UI system, performance budgets, and Vercel deployment are documented in [../docs/frontend/architecture.md](../docs/frontend/architecture.md) and the related files in [`../docs/frontend/`](../docs/frontend/).
+The app implements the create, link-list, token-unlock, detail and analytics flows described in [../docs/frontend/architecture.md](../docs/frontend/architecture.md) and the related files in [`../docs/frontend/`](../docs/frontend/).
