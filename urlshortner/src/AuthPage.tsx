@@ -1,6 +1,7 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent, type KeyboardEvent } from 'react'
 import {
   ArrowRight,
+  Check,
   Eye,
   EyeOff,
   LoaderCircle,
@@ -9,16 +10,14 @@ import {
   ShieldCheck,
   UserRound,
 } from 'lucide-react'
-import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom'
-import { isProblem, type ApiProblem } from './api'
+import { Link, Navigate, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
+import { isProblem, warmUp, type ApiProblem } from './api'
 import { useAuth } from './auth'
+import { authProblemText, passwordPasteWarning } from './authFeedback'
 
-function errorText(problem: ApiProblem): string {
-  if (problem.status === 429 && problem.retryAfterSeconds !== undefined) {
-    return `${problem.detail} Try again in ${Math.max(1, Math.ceil(problem.retryAfterSeconds))} seconds.`
-  }
-  return problem.detail
-}
+type AuthLocationState = { email?: string; notice?: string } | null
+
+const SLOW_AFTER_MS = 2000
 
 export function BrandMark() {
   return (
@@ -47,19 +46,57 @@ export function BrandMark() {
 export default function AuthPage({ mode }: { mode: 'login' | 'signup' }) {
   const auth = useAuth()
   const navigate = useNavigate()
+  const location = useLocation()
+  const carried = (location.state as AuthLocationState) ?? null
+  const notice = carried?.notice ?? auth.notice
   const [params] = useSearchParams()
   const next = params.get('next')
   const returnTo = next && next.startsWith('/') && !next.startsWith('//') ? next : '/'
-  const [email, setEmail] = useState('')
+  const [email, setEmail] = useState(carried?.email ?? '')
   const [displayName, setDisplayName] = useState('')
   const [password, setPassword] = useState('')
+  const [remember, setRemember] = useState(true)
   const [reveal, setReveal] = useState(false)
   const [problem, setProblem] = useState<ApiProblem | null>(null)
   const [fieldError, setFieldError] = useState<{ email?: string; password?: string }>({})
   const [busy, setBusy] = useState(false)
+  const [slow, setSlow] = useState(false)
+  const [capsLock, setCapsLock] = useState(false)
+  const [pasteWarning, setPasteWarning] = useState<string | null>(null)
+  const [lockedUntil, setLockedUntil] = useState(0)
+  const [now, setNow] = useState(() => Date.now())
 
-  if (auth.status === 'authenticated') {
+  useEffect(() => {
+    warmUp()
+  }, [])
+
+  useEffect(() => {
+    if (!busy) return
+    const timer = window.setTimeout(() => setSlow(true), SLOW_AFTER_MS)
+    return () => {
+      window.clearTimeout(timer)
+      setSlow(false)
+    }
+  }, [busy])
+
+  useEffect(() => {
+    if (lockedUntil <= Date.now()) return
+    const timer = window.setInterval(() => {
+      const current = Date.now()
+      setNow(current)
+      if (current >= lockedUntil) window.clearInterval(timer)
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [lockedUntil])
+
+  if (auth.status === 'authenticated' && auth.verified) {
     return <Navigate to={returnTo} replace />
+  }
+
+  const waitSeconds = Math.max(0, Math.ceil((lockedUntil - now) / 1000))
+
+  function trackCapsLock(event: KeyboardEvent<HTMLInputElement>) {
+    setCapsLock(event.getModifierState?.('CapsLock') ?? false)
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -73,19 +110,24 @@ export default function AuthPage({ mode }: { mode: 'login' | 'signup' }) {
     }
     setFieldError(errors)
     setProblem(null)
-    if (Object.keys(errors).length > 0) return
+    if (Object.keys(errors).length > 0 || waitSeconds > 0) return
 
     setBusy(true)
     try {
       if (mode === 'signup') {
-        await auth.signup(email.trim(), password, displayName.trim())
+        await auth.signup(email.trim(), password, displayName.trim(), remember)
       } else {
-        await auth.login(email.trim(), password)
+        await auth.login(email.trim(), password, remember)
       }
       navigate(returnTo, { replace: true })
     } catch (error) {
       if (isProblem(error)) {
         setProblem(error.problem)
+        if (error.problem.status === 429) {
+          const seconds = Math.max(1, Math.ceil(error.problem.retryAfterSeconds ?? 60))
+          setNow(Date.now())
+          setLockedUntil(Date.now() + seconds * 1000)
+        }
         const mapped: { email?: string; password?: string } = {}
         for (const issue of error.problem.errors) {
           if (issue.field === 'email') mapped.email = issue.message
@@ -152,9 +194,15 @@ export default function AuthPage({ mode }: { mode: 'login' | 'signup' }) {
             </p>
           </div>
 
+          {notice && !problem && (
+            <p className="field-success auth-notice" role="status">
+              <Check size={14} /> {notice}
+            </p>
+          )}
+
           {problem && (
             <div className="form-problem" role="alert">
-              <span>{errorText(problem)}</span>
+              <span>{authProblemText(problem, waitSeconds, typeof navigator !== 'undefined' ? navigator.onLine : true)}</span>
             </div>
           )}
 
@@ -166,6 +214,7 @@ export default function AuthPage({ mode }: { mode: 'login' | 'signup' }) {
                   <UserRound size={17} aria-hidden="true" />
                   <input
                     id="display-name"
+                    name="name"
                     value={displayName}
                     onChange={(event) => setDisplayName(event.target.value)}
                     placeholder="Saran"
@@ -182,14 +231,16 @@ export default function AuthPage({ mode }: { mode: 'login' | 'signup' }) {
                 <Mail size={17} aria-hidden="true" />
                 <input
                   id="email"
+                  name="email"
                   type="email"
                   value={email}
                   onChange={(event) => {
-                    setEmail(event.target.value)
+                    // Emails never contain spaces; pasted ones often carry a stray one.
+                    setEmail(event.target.value.trim())
                     setFieldError((current) => ({ ...current, email: undefined }))
                   }}
                   placeholder="you@example.com"
-                  autoComplete="email"
+                  autoComplete={isSignup ? 'email' : 'username'}
                   autoCapitalize="none"
                   spellCheck={false}
                   aria-invalid={Boolean(fieldError.email)}
@@ -208,15 +259,24 @@ export default function AuthPage({ mode }: { mode: 'login' | 'signup' }) {
                 <LockKeyhole size={17} aria-hidden="true" />
                 <input
                   id="password"
+                  name="password"
                   type={reveal ? 'text' : 'password'}
                   value={password}
                   onChange={(event) => {
                     setPassword(event.target.value)
+                    if (!/\s$|^\s/.test(event.target.value)) setPasteWarning(null)
                     setFieldError((current) => ({ ...current, password: undefined }))
                   }}
+                  onPaste={(event) =>
+                    setPasteWarning(passwordPasteWarning(event.clipboardData.getData('text')))
+                  }
+                  onKeyDown={trackCapsLock}
+                  onKeyUp={trackCapsLock}
+                  onBlur={() => setCapsLock(false)}
                   placeholder={isSignup ? 'At least 10 characters' : 'Your password'}
                   autoComplete={isSignup ? 'new-password' : 'current-password'}
                   aria-invalid={Boolean(fieldError.password)}
+                  aria-describedby="password-notes"
                 />
                 <button
                   type="button"
@@ -227,19 +287,52 @@ export default function AuthPage({ mode }: { mode: 'login' | 'signup' }) {
                   {reveal ? <EyeOff size={17} /> : <Eye size={17} />}
                 </button>
               </div>
-              {fieldError.password && (
-                <p className="field-error" role="alert">
-                  {fieldError.password}
-                </p>
-              )}
+              <div id="password-notes" aria-live="polite">
+                {fieldError.password && (
+                  <p className="field-error" role="alert">
+                    {fieldError.password}
+                  </p>
+                )}
+                {capsLock && <p className="field-hint auth-warning">Caps Lock is on.</p>}
+                {pasteWarning && <p className="field-hint auth-warning">{pasteWarning}</p>}
+              </div>
             </div>
 
-            <button type="submit" className="primary-button auth-submit" disabled={busy}>
+            <label className="remember-row auth-remember">
+              <input
+                type="checkbox"
+                name="remember"
+                checked={remember}
+                onChange={(event) => setRemember(event.target.checked)}
+              />
+              <span>
+                Stay signed in
+                <small>
+                  {remember
+                    ? 'Keeps you signed in on this browser for 30 days of use.'
+                    : 'Signs you out when you close the browser.'}
+                </small>
+              </span>
+            </label>
+
+            <button
+              type="submit"
+              className="primary-button auth-submit"
+              disabled={busy || waitSeconds > 0}
+            >
               {busy ? (
                 <>
                   <LoaderCircle size={16} className="spin" />
-                  {isSignup ? 'Creating workspace…' : 'Signing in…'}
+                  {slow
+                    ? isSignup
+                      ? 'Still creating your workspace…'
+                      : 'Still signing in…'
+                    : isSignup
+                      ? 'Creating workspace…'
+                      : 'Signing in…'}
                 </>
+              ) : waitSeconds > 0 ? (
+                <>Try again in {waitSeconds}s</>
               ) : (
                 <>
                   {isSignup ? 'Create account' : 'Sign in'}
@@ -247,12 +340,18 @@ export default function AuthPage({ mode }: { mode: 'login' | 'signup' }) {
                 </>
               )}
             </button>
+            {slow && (
+              <p className="field-hint auth-slow" role="status">
+                The server is waking up. This can take a few seconds.
+              </p>
+            )}
           </form>
 
           <p className="auth-switch">
             {isSignup ? 'Already have an account?' : 'New to Shortly?'}{' '}
             <Link
               to={`${isSignup ? '/login' : '/signup'}${next ? `?next=${encodeURIComponent(next)}` : ''}`}
+              state={email ? { email } : undefined}
             >
               {isSignup ? 'Sign in' : 'Create one'}
             </Link>

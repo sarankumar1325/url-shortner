@@ -176,12 +176,17 @@ export type Access = {
   token?: string | null
 }
 
-function normalize(signal: AbortSignal): AbortSignal {
+const DEFAULT_TIMEOUT_MS = 10_000
+// Sign-in can land on a cold function and a suspended database; the form says
+// "Still signing in…" rather than giving up on a request that will succeed.
+const AUTH_TIMEOUT_MS = 30_000
+
+function normalize(signal: AbortSignal, timeoutMs: number): AbortSignal {
   if (typeof AbortSignal.any === 'function' && typeof AbortSignal.timeout === 'function') {
-    return AbortSignal.any([signal, AbortSignal.timeout(10_000)])
+    return AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
   }
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 10_000)
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
   signal.addEventListener('abort', () => controller.abort(), { once: true })
   controller.signal.addEventListener('abort', () => clearTimeout(timeout), {
     once: true,
@@ -243,6 +248,7 @@ async function request<T>(
     access?: Access
     idempotencyKey?: string
     signal: AbortSignal
+    timeoutMs?: number
   },
 ): Promise<T> {
   const headers: Record<string, string> = {
@@ -268,7 +274,7 @@ async function request<T>(
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
       cache: 'no-store',
       credentials: 'include',
-      signal: normalize(options.signal),
+      signal: normalize(options.signal, options.timeoutMs ?? DEFAULT_TIMEOUT_MS),
     })
   } catch (error) {
     if (options.signal.aborted) {
@@ -309,25 +315,42 @@ async function request<T>(
   }
 }
 
+let warmed = false
+
+/**
+ * Starts the API's serverless function and wakes the database before the user
+ * submits a form, so cold starts overlap with typing. Fire-and-forget.
+ */
+export function warmUp(): void {
+  if (warmed || typeof fetch !== 'function') return
+  warmed = true
+  void fetch(`${API_BASE}/api/v1/ready`, {
+    cache: 'no-store',
+    credentials: 'omit',
+  }).catch(() => undefined)
+}
+
 export function signup(
-  body: { email: string; password: string; display_name?: string },
+  body: { email: string; password: string; display_name?: string; remember?: boolean },
   signal: AbortSignal,
 ): Promise<Session> {
   return request<Session>('/api/v1/auth/signup', {
     method: 'POST',
     body,
     signal,
+    timeoutMs: AUTH_TIMEOUT_MS,
   })
 }
 
 export function login(
-  body: { email: string; password: string },
+  body: { email: string; password: string; remember?: boolean },
   signal: AbortSignal,
 ): Promise<Session> {
   return request<Session>('/api/v1/auth/login', {
     method: 'POST',
     body,
     signal,
+    timeoutMs: AUTH_TIMEOUT_MS,
   })
 }
 
@@ -347,6 +370,18 @@ export function changePassword(
     method: 'POST',
     body,
     signal,
+  })
+}
+
+export function deleteAccount(
+  body: { password: string; confirm_email: string },
+  signal: AbortSignal,
+): Promise<void> {
+  return request<void>('/api/v1/auth/account', {
+    method: 'DELETE',
+    body,
+    signal,
+    timeoutMs: AUTH_TIMEOUT_MS,
   })
 }
 

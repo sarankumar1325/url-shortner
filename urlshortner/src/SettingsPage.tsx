@@ -19,6 +19,7 @@ import {
 import { useNavigate } from 'react-router-dom'
 import {
   changePassword,
+  deleteAccount,
   deleteWorkspace,
   isProblem,
   listMembers,
@@ -29,6 +30,7 @@ import {
   transferOwnership,
   type ActiveSession,
   type Member,
+  type ValidationIssue,
   type WorkspaceRole,
 } from './api'
 import { useAuth } from './auth'
@@ -53,6 +55,23 @@ function describe(error: unknown): string {
 function fieldMessage(error: unknown, field: string): string | null {
   if (!isProblem(error)) return null
   return error.problem.errors.find((issue) => issue.field === field)?.message ?? null
+}
+
+type Blocker = { id: string; name: string; message: string }
+
+/** The shared workspaces the server says must be handed off first. */
+function blockersFrom(errors: readonly ValidationIssue[]): Blocker[] {
+  return errors.flatMap((issue) => {
+    const extra = issue as ValidationIssue & { workspace_id?: unknown; name?: unknown }
+    if (typeof extra.workspace_id !== 'string') return []
+    return [
+      {
+        id: extra.workspace_id,
+        name: typeof extra.name === 'string' ? extra.name : 'A shared workspace',
+        message: issue.message,
+      },
+    ]
+  })
 }
 
 function formatDate(value: string): string {
@@ -105,6 +124,12 @@ export default function SettingsPage() {
   const [confirmName, setConfirmName] = useState('')
   const [deleteBusy, setDeleteBusy] = useState(false)
   const [deleteError, setDeleteError] = useState('')
+
+  const [accountPassword, setAccountPassword] = useState('')
+  const [accountEmail, setAccountEmail] = useState('')
+  const [accountBusy, setAccountBusy] = useState(false)
+  const [accountError, setAccountError] = useState('')
+  const [accountBlockers, setAccountBlockers] = useState<Blocker[]>([])
 
   const loadSessions = useCallback(async (signal: AbortSignal) => {
     setSessionsLoading(true)
@@ -315,6 +340,37 @@ export default function SettingsPage() {
     }
   }
 
+  async function submitDeleteAccount(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!user) return
+    setAccountError('')
+    if (accountEmail.toLowerCase() !== user.email.toLowerCase()) {
+      setAccountError('Type your email address exactly to confirm.')
+      return
+    }
+    setAccountBusy(true)
+    try {
+      await deleteAccount(
+        { password: accountPassword, confirm_email: accountEmail },
+        new AbortController().signal,
+      )
+      auth.forget('Your account was deleted.')
+      navigate('/login', { replace: true })
+    } catch (failure) {
+      setAccountBusy(false)
+      if (isProblem(failure) && failure.problem.code === 'owns_shared_workspaces') {
+        setAccountBlockers(blockersFrom(failure.problem.errors))
+        setAccountError(failure.problem.detail)
+        return
+      }
+      setAccountError(
+        isProblem(failure) && failure.problem.code === 'invalid_password'
+          ? 'That password is not correct.'
+          : describe(failure),
+      )
+    }
+  }
+
   if (!workspace || !role || !user) return null
 
   const transferable = members.filter(
@@ -375,9 +431,18 @@ export default function SettingsPage() {
               <ShieldCheck size={19} strokeWidth={1.5} />
             </div>
             <form className="settings-form" onSubmit={submitPassword} noValidate>
+              <input
+                type="text"
+                name="username"
+                autoComplete="username"
+                value={user.email}
+                readOnly
+                hidden
+              />
               <label htmlFor="current-password">Current password</label>
               <input
                 id="current-password"
+                name="current-password"
                 type="password"
                 autoComplete="current-password"
                 value={currentPassword}
@@ -391,6 +456,7 @@ export default function SettingsPage() {
               <label htmlFor="new-password">New password</label>
               <input
                 id="new-password"
+                name="new-password"
                 type="password"
                 autoComplete="new-password"
                 value={newPassword}
@@ -407,6 +473,7 @@ export default function SettingsPage() {
               <label htmlFor="confirm-password">Confirm new password</label>
               <input
                 id="confirm-password"
+                name="confirm-password"
                 type="password"
                 autoComplete="new-password"
                 value={confirmPassword}
@@ -535,6 +602,112 @@ export default function SettingsPage() {
                 Sign out other sessions{otherSessions ? ` (${otherSessions})` : ''}
               </button>
             </div>
+          </section>
+
+          <section
+            className="panel settings-panel danger-panel"
+            aria-labelledby="delete-account-heading"
+          >
+            <div className="section-heading">
+              <div>
+                <h2 id="delete-account-heading">Delete account</h2>
+                <p className="meta">
+                  Removes your sign-in, your personal workspace, and workspaces
+                  where you are the only member.
+                </p>
+              </div>
+              <Trash2 size={19} strokeWidth={1.5} />
+            </div>
+            <p className="meta danger-copy">
+              Their links stop working and their short codes are never reused.
+              Links you made in other people's workspaces stay there. This
+              cannot be undone.
+            </p>
+            {accountBlockers.length > 0 && (
+              <div className="confirm-block" role="alert">
+                <p>
+                  Transfer ownership or delete these shared workspaces first:
+                </p>
+                <ul className="blocker-list">
+                  {accountBlockers.map((item) => (
+                    <li key={item.id}>
+                      <button
+                        type="button"
+                        className="text-button"
+                        onClick={() => {
+                          auth.selectWorkspace(item.id)
+                          window.scrollTo({ top: 0 })
+                        }}
+                      >
+                        {item.name}
+                      </button>{' '}
+                      <span className="meta">{item.message}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            <form className="settings-form" onSubmit={submitDeleteAccount} noValidate>
+              <input
+                type="text"
+                name="username"
+                autoComplete="username"
+                value={user.email}
+                readOnly
+                hidden
+              />
+              <label htmlFor="delete-account-password">Current password</label>
+              <input
+                id="delete-account-password"
+                name="password"
+                type="password"
+                autoComplete="current-password"
+                value={accountPassword}
+                onChange={(event) => {
+                  setAccountPassword(event.target.value)
+                  setAccountError('')
+                }}
+                disabled={accountBusy}
+              />
+              <label htmlFor="delete-account-email">
+                Type <strong>{user.email}</strong> to confirm
+              </label>
+              <input
+                id="delete-account-email"
+                name="confirm-email"
+                type="email"
+                value={accountEmail}
+                onChange={(event) => {
+                  setAccountEmail(event.target.value.trim())
+                  setAccountError('')
+                }}
+                autoComplete="off"
+                autoCapitalize="none"
+                spellCheck={false}
+                disabled={accountBusy}
+              />
+              {accountError && (
+                <p className="field-error" role="alert">
+                  {accountError}
+                </p>
+              )}
+              <button
+                type="submit"
+                className="danger-button"
+                disabled={
+                  accountBusy ||
+                  !accountPassword ||
+                  accountEmail.toLowerCase() !== user.email.toLowerCase()
+                }
+              >
+                {accountBusy ? (
+                  <LoaderCircle size={14} className="spin" />
+                ) : (
+                  <Trash2 size={14} />
+                )}
+                Delete my account
+              </button>
+            </form>
           </section>
         </div>
 

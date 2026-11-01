@@ -18,13 +18,22 @@ import {
   type WorkspaceRole,
   type WorkspaceSummary,
 } from './api'
+import {
+  browserStorage,
+  clearCachedSession,
+  initialAuthState,
+  settleSession,
+  writeCachedSession,
+  type AuthState,
+  type AuthStatus,
+} from './sessionCache'
 
 const ACTIVE_WORKSPACE_KEY = 'shortly.workspace.v1'
 
-type Status = 'loading' | 'authenticated' | 'anonymous'
-
 type AuthValue = {
-  status: Status
+  status: AuthStatus
+  /** False while the shell is drawn from the cached summary. */
+  verified: boolean
   session: Session | null
   workspace: WorkspaceSummary | null
   role: WorkspaceRole | null
@@ -33,13 +42,18 @@ type AuthValue = {
   updateWorkspace: (workspace: WorkspaceSummary) => void
   removeWorkspace: (id: string) => void
   createWorkspace: (name: string) => Promise<WorkspaceSummary>
-  login: (email: string, password: string) => Promise<void>
+  login: (email: string, password: string, remember: boolean) => Promise<void>
   signup: (
     email: string,
     password: string,
     displayName: string,
+    remember: boolean,
   ) => Promise<void>
   logout: () => Promise<void>
+  /** Drops the local session without calling the API (after account deletion). */
+  forget: (notice?: string) => void
+  /** Shown once on the sign-in page after forget(notice). */
+  notice: string | null
   refresh: () => Promise<void>
 }
 
@@ -74,13 +88,16 @@ function chooseWorkspace(
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [session, setSession] = useState<Session | null>(null)
-  const [status, setStatus] = useState<Status>('loading')
-  const [activeId, setActiveId] = useState<string | null>(savedWorkspace)
+  const [state, setState] = useState<AuthState>(() => initialAuthState(browserStorage()))
+  const [activeId, setActiveId] = useState<string | null>(() =>
+    state.session
+      ? (chooseWorkspace(state.session.workspaces, savedWorkspace())?.id ?? null)
+      : savedWorkspace(),
+  )
+  const { session, status, verified } = state
+  const [notice, setNotice] = useState<string | null>(null)
 
-  const applySession = useCallback((next: Session) => {
-    setSession(next)
-    setStatus('authenticated')
+  const pickWorkspace = useCallback((next: Session) => {
     setActiveId((current) => {
       const workspace = chooseWorkspace(next.workspaces, current)
       if (workspace) rememberWorkspace(workspace.id)
@@ -88,19 +105,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     })
   }, [])
 
+  const applySession = useCallback(
+    (next: Session) => {
+      setState((current) => settleSession(browserStorage(), current, { kind: 'ok', session: next }))
+      setNotice(null)
+      pickWorkspace(next)
+    },
+    [pickWorkspace],
+  )
+
+  const signedOut = useCallback(() => {
+    setState((current) => settleSession(browserStorage(), current, { kind: 'unauthorized' }))
+    setActiveId(null)
+  }, [])
+
+  // Keeps the cached summary in step with local edits (rename, new workspace).
+  useEffect(() => {
+    if (status === 'authenticated' && session) writeCachedSession(browserStorage(), session)
+  }, [status, session])
+
   const refresh = useCallback(async () => {
     const controller = new AbortController()
     try {
       applySession(await getSession(controller.signal))
     } catch (error) {
       if (isProblem(error) && error.problem.status === 401) {
-        setSession(null)
-        setStatus('anonymous')
+        signedOut()
         return
       }
       throw error
     }
-  }, [applySession])
+  }, [applySession, signedOut])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -108,10 +143,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .then(applySession)
       .catch((error: unknown) => {
         if (isProblem(error) && error.problem.kind === 'cancelled') return
-        setStatus('anonymous')
+        if (isProblem(error) && error.problem.status === 401) {
+          signedOut()
+          return
+        }
+        setState((current) => settleSession(browserStorage(), current, { kind: 'failed' }))
       })
     return () => controller.abort()
-  }, [applySession])
+  }, [applySession, signedOut])
 
   const workspace = useMemo(
     () => session?.workspaces.find((item) => item.id === activeId) ?? null,
@@ -127,39 +166,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [session],
   )
 
+  const updateSession = useCallback((update: (current: Session) => Session) => {
+    setState((current) =>
+      current.session ? { ...current, session: update(current.session) } : current,
+    )
+  }, [])
+
   const addWorkspace = useCallback(
     (next: WorkspaceSummary) => {
-      setSession((current) => {
-        if (!current) return current
-        const workspaces = [
-          ...current.workspaces.filter((item) => item.id !== next.id),
-          next,
-        ]
-        return { ...current, workspaces }
-      })
+      updateSession((current) => ({
+        ...current,
+        workspaces: [...current.workspaces.filter((item) => item.id !== next.id), next],
+      }))
       setActiveId(next.id)
       rememberWorkspace(next.id)
     },
-    [],
+    [updateSession],
   )
 
-  const updateWorkspace = useCallback((next: WorkspaceSummary) => {
-    setSession((current) => {
-      if (!current) return current
-      return {
+  const updateWorkspace = useCallback(
+    (next: WorkspaceSummary) => {
+      updateSession((current) => ({
         ...current,
-        workspaces: current.workspaces.map((item) =>
-          item.id === next.id ? next : item,
-        ),
-      }
-    })
-  }, [])
+        workspaces: current.workspaces.map((item) => (item.id === next.id ? next : item)),
+      }))
+    },
+    [updateSession],
+  )
 
   const removeWorkspace = useCallback(
     (id: string) => {
       if (!session) return
       const workspaces = session.workspaces.filter((item) => item.id !== id)
-      setSession({ ...session, workspaces })
+      updateSession((current) => ({ ...current, workspaces }))
       setActiveId((current) => {
         if (current !== id) return current
         const next = chooseWorkspace(workspaces, null)
@@ -167,15 +206,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return next?.id ?? null
       })
     },
-    [session],
+    [session, updateSession],
   )
 
   const createWorkspace = useCallback(
     async (name: string) => {
-      const created = await createWorkspaceRequest(
-        name,
-        new AbortController().signal,
-      )
+      const created = await createWorkspaceRequest(name, new AbortController().signal)
       addWorkspace(created)
       return created
     },
@@ -183,19 +219,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   )
 
   const login = useCallback(
-    async (email: string, password: string) => {
+    async (email: string, password: string, remember: boolean) => {
       applySession(
-        await loginRequest({ email, password }, new AbortController().signal),
+        await loginRequest({ email, password, remember }, new AbortController().signal),
       )
     },
     [applySession],
   )
 
   const signup = useCallback(
-    async (email: string, password: string, displayName: string) => {
+    async (email: string, password: string, displayName: string, remember: boolean) => {
       applySession(
         await signupRequest(
-          { email, password, display_name: displayName || undefined },
+          { email, password, display_name: displayName || undefined, remember },
           new AbortController().signal,
         ),
       )
@@ -203,19 +239,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [applySession],
   )
 
+  const forget = useCallback((message?: string) => {
+    setNotice(message ?? null)
+    clearCachedSession(browserStorage())
+    setState({ status: 'anonymous', session: null, verified: false })
+    setActiveId(null)
+  }, [])
+
   const logout = useCallback(async () => {
     try {
       await logoutRequest(new AbortController().signal)
     } finally {
-      setSession(null)
-      setStatus('anonymous')
-      setActiveId(null)
+      forget()
     }
-  }, [])
+  }, [forget])
 
   const value = useMemo<AuthValue>(
     () => ({
       status,
+      verified,
       session,
       workspace,
       role: workspace?.role ?? null,
@@ -227,10 +269,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       login,
       signup,
       logout,
+      forget,
+      notice,
       refresh,
     }),
     [
       status,
+      verified,
       session,
       workspace,
       selectWorkspace,
@@ -241,6 +286,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       login,
       signup,
       logout,
+      forget,
+      notice,
       refresh,
     ],
   )
