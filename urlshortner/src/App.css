@@ -3732,3 +3732,45 @@ button:disabled {
     display: none;
   }
 }
+
+/* Campaign tracking extras */
+.option-check {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  margin-top: 14px;
+  font-size: 13px;
+  font-weight: 400;
+  cursor: pointer;
+}
+.option-check input {
+  margin-top: 3px;
+  accent-color: var(--accent);
+  flex: none;
+}
+.option-check span {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.option-check small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.campaign-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.campaign-chip {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.campaign-chip > span {
+  opacity: 0.75;
+}

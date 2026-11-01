@@ -95,6 +95,16 @@ import {
   type LinkRecord,
 } from './links'
 import { shortcutFor } from './shortcuts'
+import {
+  EMPTY_CAMPAIGN,
+  UTM_KEYS,
+  UTM_LABELS,
+  campaignChips,
+  parseCampaign,
+  readUtmRecents,
+  rememberUtm,
+  type CampaignFields,
+} from './utm'
 import CommandPalette, { type PaletteCommand } from './CommandPalette'
 import { EXPLORE_ITEMS, WORKSPACE_ITEMS } from './navigation'
 import { copyText, fullUrl, pasteIsForPage, urlFromPaste } from './clipboard'
@@ -181,6 +191,20 @@ function createFieldErrors(problem: ApiProblem): {
   return {}
 }
 
+/** UTM values already in a destination, or null when it has none. */
+function campaignFromUrl(value: string): Required<CampaignFields> | null {
+  const parsed = parseCampaign(normalizeDestination(value))
+  return parsed?.found ? parsed.fields : null
+}
+
+const UTM_PLACEHOLDERS: Record<(typeof UTM_KEYS)[number], string> = {
+  source: 'newsletter',
+  medium: 'email',
+  campaign: 'spring-launch',
+  term: 'running-shoes',
+  content: 'header-button',
+}
+
 function BootScreen() {
   return (
     <div className="boot-screen" role="status" aria-busy="true">
@@ -213,9 +237,15 @@ function CreateForm({
   const aliasState = useAliasAvailability(alias)
   const [expiry, setExpiry] = useState('')
   const [tagInput, setTagInput] = useState('')
-  const [campaign, setCampaign] = useState({ source: '', medium: '', campaign: '' })
-  const [campaignOpen, setCampaignOpen] = useState(false)
+  const [campaign, setCampaign] = useState<Required<CampaignFields>>(
+    () => (pasted ? campaignFromUrl(pasted) : null) ?? { ...EMPTY_CAMPAIGN },
+  )
+  // True while the fields mirror the URL's own utm_* values.
+  const [prefilled, setPrefilled] = useState(() => Boolean(pasted && campaignFromUrl(pasted)))
+  const [replaceUtm, setReplaceUtm] = useState(prefilled)
+  const [campaignOpen, setCampaignOpen] = useState(prefilled)
   const [campaignError, setCampaignError] = useState<string | null>(null)
+  const [recents, setRecents] = useState(() => readUtmRecents(window.localStorage, workspaceId))
   const [tagError, setTagError] = useState<string | null>(null)
   const [fallback, setFallback] = useState('')
   const [visitLimit, setVisitLimit] = useState('')
@@ -260,6 +290,8 @@ function CreateForm({
       setResult(created)
       setAttempt(null)
       onCreate(created)
+      if (UTM_KEYS.some((key) => campaign[key].trim()))
+        setRecents(rememberUtm(window.localStorage, workspaceId, campaign))
     } catch (error) {
       if (isProblem(error) && error.problem.kind === 'cancelled') return
       if (!isProblem(error)) {
@@ -301,7 +333,7 @@ function CreateForm({
     event.preventDefault()
     const parsedTags = parseTags(tagInput)
     const normalized = normalizeDestination(destination)
-    const tracked = campaignDestination(normalized, campaign)
+    const tracked = campaignDestination(normalized, campaign, replaceUtm)
     const problems = validateDraft(normalized, alias, expiry, links)
     if (!problems.destination && !tracked.error) {
       problems.destination = validateDraft(tracked.url, '', '', []).destination
@@ -352,9 +384,27 @@ function CreateForm({
     setProblem(null)
   }
 
+  /** Mirror utm_* values from a pasted or typed URL, unless the user typed their own. */
+  function adoptCampaign(next: string) {
+    const found = campaignFromUrl(next)
+    if (found) {
+      if (!prefilled && UTM_KEYS.some((key) => campaign[key].trim())) return
+      setCampaign(found)
+      setPrefilled(true)
+      setReplaceUtm(true)
+      setCampaignOpen(true)
+    } else if (prefilled) {
+      setCampaign({ ...EMPTY_CAMPAIGN })
+      setPrefilled(false)
+      setReplaceUtm(false)
+    }
+  }
+
   async function paste() {
     try {
-      setDestination(await navigator.clipboard.readText())
+      const text = await navigator.clipboard.readText()
+      setDestination(text)
+      adoptCampaign(text)
       setPasteMessage('')
       edit()
     } catch {
@@ -388,7 +438,9 @@ function CreateForm({
               setFallback('')
               setVisitLimit('')
               setLimitErrors({})
-              setCampaign({ source: '', medium: '', campaign: '' })
+              setCampaign({ ...EMPTY_CAMPAIGN })
+              setPrefilled(false)
+              setReplaceUtm(false)
               setCampaignError(null)
               setCampaignOpen(false)
               setTagError(null)
@@ -479,6 +531,7 @@ function CreateForm({
             value={destination}
             onChange={(event) => {
               setDestination(event.target.value)
+              adoptCampaign(event.target.value)
               setPasteMessage('')
               setCampaignError(null)
               edit()
@@ -523,28 +576,72 @@ function CreateForm({
         </button>
         {campaignOpen && (
           <div className="campaign-options" id="campaign-options">
-            <p className="field-hint">Add UTM parameters so your analytics tool can identify where visitors came from.</p>
+            <p className="field-hint">
+              {prefilled
+                ? 'Filled in from the UTM parameters already in this URL. Edit them here.'
+                : 'Add UTM parameters so your analytics tool can identify where visitors came from. Recent values are suggested as you type.'}
+            </p>
             <div className="campaign-fields">
-              {([
-                ['source', 'Source', 'newsletter'],
-                ['medium', 'Medium', 'email'],
-                ['campaign', 'Campaign', 'spring-launch'],
-              ] as const).map(([key, label, placeholder]) => (
+              {UTM_KEYS.map((key) => (
                 <div key={key}>
-                  <label htmlFor={`campaign-${key}`}>{label}</label>
-                  <input id={`campaign-${key}`} value={campaign[key]} placeholder={placeholder}
+                  <label htmlFor={`campaign-${key}`}>
+                    {UTM_LABELS[key]}
+                    {(key === 'term' || key === 'content') && <span className="meta"> (optional)</span>}
+                  </label>
+                  <input
+                    id={`campaign-${key}`}
+                    value={campaign[key]}
+                    placeholder={UTM_PLACEHOLDERS[key]}
+                    list={recents[key].length ? `campaign-${key}-recent` : undefined}
+                    autoComplete="off"
+                    spellCheck={false}
                     onChange={(event) => {
                       setCampaign({ ...campaign, [key]: event.target.value })
+                      setPrefilled(false)
                       setCampaignError(null)
                       edit()
-                    }} />
+                    }}
+                  />
+                  {recents[key].length > 0 && (
+                    <datalist id={`campaign-${key}-recent`}>
+                      {recents[key].map((value) => (
+                        <option key={value} value={value} />
+                      ))}
+                    </datalist>
+                  )}
                 </div>
               ))}
             </div>
-            {campaignError && <p className="field-error" role="alert">{campaignError}</p>}
-            {Object.values(campaign).some((value) => value.trim()) && !campaignDestination(normalizeDestination(destination), campaign).error && !validateDraft(normalizeDestination(destination), '', '', []).destination && (
-              <p className="campaign-preview"><strong>Destination preview</strong><span>{campaignDestination(normalizeDestination(destination), campaign).url}</span></p>
+            {campaignFromUrl(destination) && (
+              <label className="option-check">
+                <input
+                  type="checkbox"
+                  checked={replaceUtm}
+                  onChange={(event) => {
+                    setReplaceUtm(event.target.checked)
+                    setCampaignError(null)
+                    edit()
+                  }}
+                />
+                <span>
+                  Replace existing
+                  <small>
+                    {replaceUtm
+                      ? 'The UTM values already in the URL are swapped for the ones above.'
+                      : 'The fields above are added, so they must not repeat a UTM parameter already in the URL.'}
+                  </small>
+                </span>
+              </label>
             )}
+            {campaignError && <p className="field-error" role="alert">{campaignError}</p>}
+            {(UTM_KEYS.some((key) => campaign[key].trim()) || campaignFromUrl(destination)) &&
+              !campaignDestination(normalizeDestination(destination), campaign, replaceUtm).error &&
+              !validateDraft(normalizeDestination(destination), '', '', []).destination && (
+                <p className="campaign-preview">
+                  <strong>Destination preview</strong>
+                  <span>{campaignDestination(normalizeDestination(destination), campaign, replaceUtm).url}</span>
+                </p>
+              )}
           </div>
         )}
         <button
@@ -1076,6 +1173,15 @@ function DetailPage({
               {link.destination} <ExternalLink size={13} />
             </a>
           </details>
+          {campaignChips(link.destination).length > 0 && (
+            <ul className="campaign-chips" aria-label="Campaign tracking">
+              {campaignChips(link.destination).map((chip) => (
+                <li key={chip.key} className="tag-chip campaign-chip">
+                  <span>{chip.label}</span> {chip.value}
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
         <div className="detail-actions">
           <button

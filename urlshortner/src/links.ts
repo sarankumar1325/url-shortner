@@ -70,33 +70,7 @@ export function normalizeDestination(destination: string): string {
   return destination.trim().replace(/^(https?:)\/(?!\/)(?=[^/?#\s])/i, '$1//')
 }
 
-export type CampaignFields = { source: string; medium: string; campaign: string }
-
-/** Add tracking parameters without rewriting the destination's existing query. */
-export function campaignDestination(destination: string, fields: CampaignFields): {
-  url: string
-  error: string | null
-} {
-  const value = destination.trim()
-  const additions = Object.entries(fields).filter(([, field]) => field.trim())
-  if (!additions.length) return { url: value, error: null }
-  let parsed: URL
-  try {
-    parsed = new URL(value)
-  } catch {
-    return { url: value, error: null } // Destination validation supplies the error.
-  }
-  const duplicate = additions.find(([key]) => parsed.searchParams.has(`utm_${key}`))
-  if (duplicate) {
-    return { url: value, error: `This URL already has utm_${duplicate[0]}. Remove it from the URL or leave that field blank.` }
-  }
-  const hashIndex = value.indexOf('#')
-  const base = hashIndex < 0 ? value : value.slice(0, hashIndex)
-  const hash = hashIndex < 0 ? '' : value.slice(hashIndex)
-  const separator = base.includes('?') ? (/[?&]$/.test(base) ? '' : '&') : '?'
-  const params = new URLSearchParams(additions.map(([key, field]) => [`utm_${key}`, field.trim()]))
-  return { url: `${base}${separator}${params.toString()}${hash}`, error: null }
-}
+export { campaignDestination, type CampaignFields } from './utm'
 
 export function recordFromMetadata(
   metadata: LinkMetadata,
