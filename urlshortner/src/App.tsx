@@ -51,6 +51,7 @@ import {
   useParams,
 } from 'react-router-dom'
 import {
+  analyticsRange,
   createLink,
   deleteLink as deleteLinkRequest,
   getAnalytics,
@@ -939,7 +940,7 @@ function DetailPage({
         try {
           const analytics = await getAnalytics(
             code,
-            30,
+            analyticsRange(30),
             access,
             controller.signal,
           )
@@ -1224,10 +1225,7 @@ function DetailPage({
             </div>
           }
         >
-          <LinkAnalytics
-            link={link}
-            onRefresh={() => setReloadKey((key) => key + 1)}
-          />
+          <LinkAnalytics link={link} workspaceId={workspaceId} />
         </Suspense>
       ) : (
         <section
@@ -1667,7 +1665,7 @@ function WorkspaceShell() {
       try {
         const analytics = await getAnalytics(
           code,
-          30,
+          analyticsRange(30),
           { workspaceId },
           controller.signal,
         )

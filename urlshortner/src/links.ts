@@ -232,13 +232,26 @@ export function sortLinks(links: LinkRecord[], sort: LinkSort, now = new Date())
   }).map(({ link }) => link)
 }
 
+/**
+ * Zero-filled daily points. A number means the last that many UTC days
+ * including today; a range covers [from, to).
+ */
 export function getSeries(
   link: Pick<LinkRecord, 'analytics'>,
-  days: 7 | 30,
+  range: number | { from: string; to: string },
   now = new Date(),
 ): ChartPoint[] {
   const today = new Date(now)
   today.setUTCHours(0, 0, 0, 0)
+  let start = today.getTime()
+  let days = 1
+  if (typeof range === 'number') {
+    days = range
+    start = today.getTime() - (days - 1) * 86_400_000
+  } else {
+    start = Date.parse(`${range.from}T00:00:00Z`)
+    days = Math.max(0, Math.round((Date.parse(`${range.to}T00:00:00Z`) - start) / 86_400_000))
+  }
   const points = new Map(
     (link.analytics?.series ?? []).map((point) => [
       point.day,
@@ -252,9 +265,7 @@ export function getSeries(
   )
 
   return Array.from({ length: days }, (_, index): ChartPoint => {
-    const day = new Date(today.getTime() - (days - 1 - index) * 86_400_000)
-      .toISOString()
-      .slice(0, 10)
+    const day = new Date(start + index * 86_400_000).toISOString().slice(0, 10)
     return points.get(day) ?? { day, clicks: 0, humans: 0, bots: 0 }
   })
 }

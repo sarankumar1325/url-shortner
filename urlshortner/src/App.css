@@ -518,7 +518,8 @@ label {
   outline: none;
   font-size: 13px;
 }
-.form-options input[type='date'] {
+.form-options input[type='date'],
+.custom-range input[type='date'] {
   width: 100%;
   height: 42px;
   border: 1px solid var(--control);
@@ -662,6 +663,15 @@ label {
 }
 .chart-bar.highlighted {
   fill: var(--chart-hover);
+}
+.chart-previous {
+  fill: none;
+  stroke: var(--text);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+  stroke-linejoin: round;
+  opacity: 0.7;
+  pointer-events: none;
 }
 .text-link,
 .text-button {
@@ -1155,6 +1165,66 @@ kbd {
 .segmented-control button[aria-pressed='true'] {
   background: var(--active);
   color: var(--text);
+}
+.analytics-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.compare-toggle {
+  min-height: 40px;
+  font-size: 13px;
+}
+.compare-toggle.on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.custom-range {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 16px 18px;
+  margin-bottom: 16px;
+}
+.custom-range > div {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.custom-range label {
+  font-size: 12px;
+  color: var(--muted);
+}
+.custom-range > p {
+  flex-basis: 100%;
+  margin: 0;
+}
+.analytics-status {
+  margin-bottom: 10px;
+}
+.analytics-section .field-error {
+  margin-bottom: 10px;
+}
+.stale {
+  opacity: 0.6;
+  transition: opacity 150ms;
+}
+.metric-change {
+  font-variant-numeric: tabular-nums;
+}
+.metrics-strip .metric-change.change-up {
+  color: var(--positive);
+}
+.metrics-strip .metric-change.change-down {
+  color: var(--negative);
+}
+.traffic-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
 }
 .metrics-strip {
   display: grid;

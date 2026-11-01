@@ -620,17 +620,21 @@ function utcDay(offsetDays = 0): string {
   return day.toISOString().slice(0, 10)
 }
 
-export function analyticsRange(days: number): { from: string; to: string } {
+/** UTC days as YYYY-MM-DD; `to` is exclusive. */
+export type DateRange = { from: string; to: string }
+
+export function analyticsRange(days: number): DateRange {
   return { from: utcDay(-(days - 1)), to: utcDay(1) }
 }
 
+/** A number means the last that many UTC days, including today. */
 export function getAnalytics(
   code: string,
-  days: number,
+  range: DateRange | number,
   access: Access,
   signal: AbortSignal,
 ): Promise<Analytics> {
-  const { from, to } = analyticsRange(days)
+  const { from, to } = typeof range === 'number' ? analyticsRange(range) : range
   const query = new URLSearchParams({ from, to, interval: 'day' })
   return request<Analytics>(
     `/api/v1/links/${encodeURIComponent(code)}/analytics?${query}`,

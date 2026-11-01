@@ -11,9 +11,12 @@ import {
 
 export function ClickChart({
   series,
+  previous,
   compact = false,
 }: {
   series: ChartPoint[]
+  /** The comparison period, drawn as a dashed line aligned day by day. */
+  previous?: ChartPoint[]
   compact?: boolean
 }) {
   const id = useId()
@@ -33,13 +36,24 @@ export function ClickChart({
   const left = compact ? 24 : 32
   const bottom = height - 24
   const step = (width - left - 6) / series.length
-  const max = Math.max(
-    4,
-    Math.ceil((Math.max(...series.map((point) => point.clicks), 0) + 1) / 4) *
-      4,
+  const peak = Math.max(
+    0,
+    ...series.map((point) => point.clicks),
+    ...(previous ?? []).map((point) => point.clicks),
   )
+  const max = Math.max(4, Math.ceil((peak + 1) / 4) * 4)
   const total = seriesTotals(series).clicks
+  const previousTotal = previous ? seriesTotals(previous).clicks : null
   const selected = highlight === null ? null : series[highlight]
+  const selectedPrevious = highlight === null ? undefined : previous?.[highlight]
+  const overlay = previous
+    ?.slice(0, series.length)
+    .map((point, index) => {
+      const x = left + index * step + step * 0.5
+      const y = bottom - (point.clicks / max) * (bottom - 8)
+      return `${x.toFixed(1)},${y.toFixed(1)}`
+    })
+    .join(' ')
   const formatDay = (day: string) =>
     new Date(`${day}T00:00:00Z`).toLocaleDateString('en-US', {
       month: 'short',
@@ -51,8 +65,14 @@ export function ClickChart({
     <div className={`click-chart ${compact ? 'compact' : ''}`} ref={container}>
       <div className="chart-readout" aria-live="polite">
         {selected
-          ? `${formatDay(selected.day)} · ${number.format(selected.clicks)} clicks`
-          : `${number.format(total)} clicks · all dates UTC`}
+          ? `${formatDay(selected.day)} · ${number.format(selected.clicks)} clicks${
+              selectedPrevious
+                ? ` · ${formatDay(selectedPrevious.day)}: ${number.format(selectedPrevious.clicks)}`
+                : ''
+            }`
+          : `${number.format(total)} clicks${
+              previousTotal === null ? '' : ` · ${number.format(previousTotal)} in the previous period (dashed)`
+            } · all dates UTC`}
       </div>
       <svg
         viewBox={`0 0 ${width} ${height}`}
@@ -61,8 +81,10 @@ export function ClickChart({
       >
         <title id={`${id}-title`}>Daily clicks</title>
         <desc id={`${id}-desc`}>
-          {number.format(total)} clicks over {series.length} days. An equivalent
-          daily data table is available in the full analytics view.
+          {number.format(total)} clicks over {series.length} days.
+          {previousTotal !== null &&
+            ` A dashed line shows the previous ${series.length} days, with ${number.format(previousTotal)} clicks.`}{' '}
+          An equivalent daily data table is available in the full analytics view.
         </desc>
         {[0, 1, 2, 3, 4].map((tick) => {
           const y = bottom - ((bottom - 8) * tick) / 4
@@ -141,6 +163,9 @@ export function ClickChart({
             </g>
           )
         })}
+        {overlay && (
+          <polyline points={overlay} className="chart-previous" aria-hidden="true" />
+        )}
       </svg>
     </div>
   )
