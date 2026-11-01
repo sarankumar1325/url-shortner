@@ -70,6 +70,8 @@ erDiagram
         boolean is_active
         boolean is_blocked
         timestamptz expires_at
+        text password_hash
+        jsonb redirect_rules
         timestamptz deleted_at
     }
     CREATE_REQUESTS {
@@ -181,6 +183,9 @@ CREATE TABLE urls (
     fallback_url TEXT CHECK (fallback_url IS NULL OR char_length(fallback_url) BETWEEN 1 AND 8192),
     max_clicks INTEGER CHECK (max_clicks IS NULL OR max_clicks BETWEEN 1 AND 1000000),
     clicks_used INTEGER NOT NULL DEFAULT 0 CHECK (clicks_used >= 0),
+    password_hash TEXT,
+    redirect_rules JSONB CONSTRAINT urls_redirect_rules_array
+        CHECK (redirect_rules IS NULL OR jsonb_typeof(redirect_rules) = 'array'),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     deleted_at TIMESTAMPTZ,
@@ -199,6 +204,9 @@ CREATE INDEX urls_workspace_created_idx ON urls(workspace_id, created_at);
 
 - IDs are internal, never required in browser JSON (avoids JavaScript bigint precision problems).
 - `clicks_used` counts visits only while `max_clicks` is set. It is incremented by one guarded `UPDATE … WHERE clicks_used < max_clicks RETURNING id`, so concurrent redirects cannot exceed the cap; clearing the cap resets it to zero. It is separate from analytics, which stay eventual.
+- `password_hash` is the Argon2id hash of an optional link password (4–128 characters); null means no password. It is never returned by the API, cached or logged; responses expose only `has_password`, and the redirect cache holds a derived HMAC tag instead.
+- `redirect_rules` holds the smart redirect rules, `[{devices?, countries?, url}]`, already validated and normalized by `services/smart_redirects.py` (at most 10 rules, at most 50 countries each). Null means no rules; an empty list from the API is stored as null. The check constraint `urls_redirect_rules_array` only guarantees a JSON array.
+- Migration `a4c7e2d91f06` (after `c8e2f5a93b17`) added both columns and the constraint. It is expand-only: both columns are nullable, so the previous release keeps reading and writing links.
 - The case-sensitive unique constraint includes deleted rows; codes never change or get reused. Hard-deleted rows (workspace or account deletion) leave their code in `retired_short_codes`, below.
 - Service validation enforces reserved codes, safe URL schemes and expiry relative to request time; database checks are the final integrity boundary.
 - `is_blocked` is operator-owned and cannot be changed by a token or workspace member. Operators must audit block actions without logging targets or tokens.

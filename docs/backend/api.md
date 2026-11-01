@@ -102,11 +102,13 @@ For public unauthenticated resolution: missing/deleted/blocked/inactive → `404
 | GET | `/api/v1/links` | `200` workspace links with `clicks_30d` |
 | GET | `/api/v1/links/availability?alias=` | `200` whether a custom alias is free, with `reason` `invalid`/`reserved`/`taken` (`taken` includes soft-deleted and retired codes); public, rate limited per IP |
 | GET | `/api/v1/links/top?days=&limit=` | `200` most-clicked workspace links over 1, 7 or 30 days; cached 60 seconds |
-| GET | `/api/v1/links/{code}` | `200` metadata; workspace, token or public access |
+| POST | `/api/v1/links/bulk` | `200` per-code results for pause, resume, delete, add or remove tags on up to 200 workspace links ([bulk actions](#bulk-actions)) |
+| GET | `/api/v1/links/{code}` | `200` metadata; workspace, token or public access (public access to a password-protected link is `401 password_required`) |
 | PATCH | `/api/v1/links/{code}` | `200` updated metadata |
 | DELETE | `/api/v1/links/{code}` | `204`; repeatable with a valid legacy token |
 | GET | `/api/v1/links/{code}/analytics` | `200` private totals/series/breakdowns |
-| GET / HEAD | `/{code}` | `302`, `404` or `410`; HEAD never counts a click; browsers (`Accept: text/html`) get an HTML page for `404`/`410` |
+| GET / HEAD | `/{code}` | `302`, `401`, `404` or `410`; HEAD never counts a click; browsers (`Accept: text/html`) get an HTML page for `404`/`410` and a password page for protected links |
+| POST | `/{code}` | Unlock a password-protected link (`password` as form or JSON field); `303` back to `/{code}` with an unlock cookie ([password-protected links](#password-protected-links)) |
 | GET | `/{code}+` | `200` HTML destination preview (Peek), or an HTML `404`/`410` page; never counts a click |
 | GET | `/api/v1/dashboard?days=7\|30\|90` | `200` workspace totals with period-over-period change, daily series, breakdowns, status counts and per-link health (up to 500 links); any workspace role |
 | GET | `/api/v1/system/status` | `200` per-instance probes, circuit breaker, cache and rate-limit counters, plus a `config` block of the running tunables; signed-in users only |
@@ -270,6 +272,8 @@ Idempotency-Key: 8f14e45f-ea4d-4b1e-9c1a-5f0e2d7a6b31
 - `expires_at`: optional/null means no expiry; otherwise strictly future, at most five years ahead.
 - `fallback_url`: optional/null; validated like `long_url`, errors use field `fallback_url`. Visitors are sent here once the link expires or runs out of visits.
 - `max_clicks`: optional/null; integer 1–1,000,000. Each counted redirect uses one visit; once used up, redirects go to `fallback_url` or return `410 link_exhausted`.
+- `password`: optional/null; 4–128 characters, compared exactly. Stored only as an Argon2id hash in `urls.password_hash`; responses expose only `has_password`. See [password-protected links](#password-protected-links).
+- `redirect_rules`: optional/null; up to 10 rules sending some visitors to another destination. See [smart redirects](#smart-redirects).
 - `Idempotency-Key`: required random UUIDv4; generate with `crypto.randomUUID()` or `uuid.uuid4()`.
 
 Return `201` with `Location: /api/v1/links/sysdesign` and:
@@ -287,15 +291,19 @@ Return `201` with `Location: /api/v1/links/sysdesign` and:
   "tags": [],
   "fallback_url": null,
   "max_clicks": null,
-  "clicks_used": 0
+  "clicks_used": 0,
+  "has_password": false,
+  "redirect_rules": []
 }
 ```
+
+`has_password` is `true` when the link has a password; the password and its hash are never returned. `redirect_rules` is the stored rule list, `[]` when there are none.
 
 A legacy unowned creation adds `"management_token": "…"` and stores only its HMAC digest. Workspace metadata responses never contain a token. GET/PATCH metadata otherwise have the same fields. Internal bigint IDs are not exposed. Build `short_url` from trusted configuration, not the incoming Host header.
 
 ### Idempotent creation
 
-1. Validate key format and canonical input; hash both. Treat omitted and null optional create fields equivalently. Do not re-evaluate a previously successful request's time-relative expiry check on replay.
+1. Validate key format and canonical input; hash both. Treat omitted and null optional create fields equivalently. A `password` enters the fingerprint only as a server-keyed HMAC, never in plain text. Do not re-evaluate a previously successful request's time-relative expiry check on replay.
 2. Serialize requests on the key hash in Postgres. Reserve it, create the link, and encrypt/store the complete successful response in the same transaction.
 3. Concurrent same key/body → one link and the same response; different body → `409 idempotency_conflict`. On a bounded key-lock wait → `409 request_in_progress` with `Retry-After`.
 4. Same key/body within 24 hours → replay the original `201` body and Location, with a fresh request ID. It describes creation, not current mutable state; replay cannot reactivate a deleted link or undo a block.
@@ -314,7 +322,25 @@ Returns `{ "links": [...], "total": n, "workspace_id": "...", "role": "owner" }`
 
 ## Update and delete
 
-PATCH accepts only `long_url`, `expires_at`, `is_active`, `tags`, `fallback_url` and `max_clicks`, and requires at least one field. Null expiry, fallback or visit limit clears it; omission preserves it. Clearing `max_clicks` resets `clicks_used`; raising it allows more visits. Null URL/active values are invalid. Code and operator block state cannot be changed. Workspace callers need `member`; legacy callers need a valid token. Revalidate URL/expiry, commit, then invalidate the positive cache best-effort.
+PATCH accepts only `long_url`, `expires_at`, `is_active`, `tags`, `fallback_url`, `max_clicks`, `password` and `redirect_rules`, and requires at least one field. Null expiry, fallback, visit limit or password clears it; omission preserves it. A new `password` replaces the hash, which invalidates existing unlock cookies. `redirect_rules` replaces the whole list; null or `[]` removes every rule. Clearing `max_clicks` resets `clicks_used`; raising it allows more visits. Null URL/active values are invalid. Code and operator block state cannot be changed. Workspace callers need `member`; legacy callers need a valid token. Revalidate URL/expiry, commit, then invalidate the positive cache best-effort.
+
+### Bulk actions
+
+```http
+POST /api/v1/links/bulk
+X-Workspace-Id: b9f3b7a2-0f1d-4c6a-9b0e-8b4a1c2d3e4f
+Content-Type: application/json
+```
+
+```json
+{ "codes": ["sysdesign", "a1B2c"], "action": "add_tags", "tags": ["launch"] }
+```
+
+- `codes`: 1–200 short codes in the selected workspace; duplicates are collapsed.
+- `action`: `pause`, `resume`, `delete` (soft delete), `add_tags` or `remove_tags`.
+- `tags`: required (at least one) for the tag actions and rejected for the others (`422 validation_error` on field `tags`).
+
+The whole request runs in one transaction. The response is `{action, results: [{short_code, status}], updated, workspace_id}`, where each `status` is `ok`, `not_found` (missing, deleted, blocked or in another workspace) or, for `add_tags`, `too_many_tags` when the link would exceed the per-link tag limit. Requires `member`, a same-origin request and is limited to 30 requests per minute per workspace (fails closed). Pause, resume and delete evict the changed codes from the redirect cache.
 
 For v1, concurrent valid PATCH operations use last-committed-write-wins for supplied fields. Do not auto-retry PATCH after ambiguous failure: read authenticated metadata and ask the user to confirm.
 
@@ -335,7 +361,7 @@ X-Workspace-Id: b9f3b7a2-0f1d-4c6a-9b0e-8b4a1c2d3e4f
 | `from` | `to` minus 30 days | Inclusive UTC date; must precede `to` |
 | `interval` | `day` | Only `day` in v1 |
 
-Any workspace role may read analytics; legacy links require the management token. The interval is `[from at 00:00 UTC, to at 00:00 UTC)`. Accept 1–366 days; reject timestamp strings, reversed ranges, or dates outside the two-year rollup retention with `422`. This default includes today's partial bucket. Zero-fill every requested day and make totals equal the series sum.
+Any workspace role may read analytics; legacy links require the management token. The interval is `[from at 00:00 UTC, to at 00:00 UTC)`. Accept 1–366 days (the web app offers 7, 30, 90 and 365 day presets plus a custom UTC range, and compares against the previous period of the same length with a second request); reject timestamp strings, reversed ranges, or dates outside the two-year rollup retention with `422`. This default includes today's partial bucket. Zero-fill every requested day and make totals equal the series sum.
 
 Example for a one-day range:
 
@@ -411,6 +437,35 @@ When a `404` or `410` request accepts `text/html`, the response is an escaped, s
 
 `GET /{code}+` (Peek) resolves the link through the same cache and rate limit as redirects, records no click, and renders the destination host, full URL, expiry and offline address signals (plain HTTP, raw IP, punycode host, known third-party shortener, non-default port). It never fetches the destination. Its Continue button points at `/{code}`, so the visit is counted and current link state applies. Pages link to the web app's abuse form using `WEB_BASE_URL`, or the first `CORS_ORIGINS` entry when it is unset.
 
+### Password-protected links
+
+A link with a password redirects only after the visitor unlocks it:
+
+- `GET /{code}` without a valid unlock cookie returns the HTML password page (`401`) when the request accepts `text/html`, otherwise `401 password_required`. `HEAD` returns `401` with no body. Link unfurlers get the same `401`, so chat previews never see the destination.
+- `POST /{code}` takes `password` as a form field or JSON body (at most 4 KiB). It is limited to 10 attempts per 5 minutes per client IP and code, and 100 per hour per code; the limiter fails closed. A correct password returns `303` to `/{code}` and sets `shortly_unlock`: `HttpOnly`, `SameSite=Lax`, `Path=/{code}`, `Max-Age` 12 hours, `Secure` in production/preview. A wrong password returns the password page with an error, or `401 invalid_password`. Missing links are `404`; expired or unprotected links `303` straight back to `/{code}`.
+- The cookie holds an expiry and an HMAC bound to the code and a tag derived from the password hash, so changing or removing the password invalidates earlier unlocks.
+- While locked, the visit limit is checked but no visit is used and no click is recorded. Expired or used-up links with a `fallback_url` go to the fallback without a password, because the fallback is not the protected destination.
+- Peek (`/{code}+`) never shows a protected destination, even after unlocking; it shows a locked page with a link to enter the password.
+- `GET /api/v1/links/{code}` without workspace or token access returns `401 password_required` for protected links.
+
+### Smart redirects
+
+`redirect_rules` is an ordered list of up to 10 rules:
+
+```json
+[
+  { "devices": ["ios"], "url": "https://apps.apple.com/app/example" },
+  { "devices": ["android"], "countries": ["DE", "AT"], "url": "https://play.google.com/store/apps/details?id=example" }
+]
+```
+
+- `devices`: any of `ios`, `android`, `mobile`, `tablet`, `desktop`; stored in that order.
+- `countries`: ISO 3166 alpha-2 codes, uppercased, de-duplicated and sorted; at most 50.
+- `url`: validated like `long_url`.
+- Each rule needs at least one of `devices` or `countries`. Errors use fields such as `redirect_rules`, `redirect_rules.2.devices`, `redirect_rules.2.countries` or `redirect_rules.2.url`.
+
+On `GET` and `HEAD /{code}`, rules are checked in order and the first match wins; otherwise the visitor goes to `long_url`. Within a rule every condition that is set must match, and any listed value satisfies a condition. Device traits come from the user agent (`mobile`, `tablet` or `desktop`, plus `ios` for iPhone/iPad/iPod and `android`); bots and unrecognized clients have no device traits, so device rules never match them. Country comes from `x-vercel-ip-country`. Link previewers always get `long_url`, and expired or used-up links go to `fallback_url` instead of evaluating rules. Peek shows the destination for the requesting visitor and notes that the link varies by device or country.
+
 `302` avoids permanent browser redirect caching; it does not make click analytics exact. Crawlers, previews, transport failures and event loss still affect counts. HTML error pages must escape all content; API clients get Problem Details.
 
 ## Errors and rate limits
@@ -430,11 +485,11 @@ When a `404` or `410` request accepts `text/html`, the response is an escaped, s
 | Status | Codes |
 | --- | --- |
 | 400 | `invalid_url`, `reserved_alias`, `invalid_workspace` |
-| 401 | `authentication_required`, `invalid_credentials`, `invalid_token` |
+| 401 | `authentication_required`, `invalid_credentials`, `invalid_token`, `password_required`, `invalid_password` (link unlock) |
 | 403 | `forbidden`, `csrf_rejected`, `invalid_password`, `personal_workspace` |
 | 404 | `link_not_found`, `workspace_not_found`, `member_not_found`, `invitation_not_found`, `session_not_found` |
 | 409 | `email_taken`, `alias_taken`, `idempotency_conflict`, `request_in_progress`, `owner_conflict`, `owns_shared_workspaces` |
-| 410 | `link_expired` |
+| 410 | `link_expired`, `link_exhausted` |
 | 413 | `payload_too_large` |
 | 422 | `validation_error` (including invalid idempotency key, self role change, invalid role), `confirmation_mismatch` |
 | 429 | `rate_limited` |
@@ -443,7 +498,7 @@ When a `404` or `410` request accepts `text/html`, the response is an escaped, s
 
 Validation errors carry `errors: [{field, code, message}]`; never include Pydantic's raw input, passwords, cookies, tokens or destination in telemetry. A 409 is not always an alias collision.
 
-Initial limits: signup 10/hour/IP; login 30/minute/IP plus 10/minute/account (both checked in one Redis pipeline); password change 10/hour/user; account deletion 10/hour/user; invite preview 60/minute/IP; workspace creation 10/hour/user; workspace link creation 60/minute/workspace; legacy create 20/minute/IP; redirect 600/minute/IP; public metadata 120/minute/IP; legacy management/analytics 60/minute. The limiter fails closed for account, creation and management paths. Limits are in [caching-and-scale.md](caching-and-scale.md).
+Initial limits: signup 10/hour/IP; login 30/minute/IP plus 10/minute/account (both checked in one Redis pipeline); password change 10/hour/user; account deletion 10/hour/user; invite preview 60/minute/IP; workspace creation 10/hour/user; workspace link creation 60/minute/workspace; legacy create 20/minute/IP; bulk link actions 30/minute/workspace; link unlock 10 per 5 minutes per IP and code plus 100/hour/code; redirect 600/minute/IP; public metadata 120/minute/IP; legacy management/analytics 60/minute. The limiter fails closed for account, creation and management paths. Limits are in [caching-and-scale.md](caching-and-scale.md).
 
 `429` always carries integer `Retry-After` seconds. Optional `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` use delta-seconds. Cron uses constant-time bearer validation against **`CRON_SECRET`**, rejects missing configuration and unauthorized callers, and returns only processing counts.
 

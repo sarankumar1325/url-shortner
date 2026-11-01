@@ -89,6 +89,13 @@ Evaluate current/cached state in this order:
 
 Expiry is independent of active state; cleanup MUST NOT turn expired rows inactive and silently change `410` to `404`. Future expiry is at most five years away; `null` clears expiry. Authorized management can inspect or extend an expired link.
 
+Before step 3, two optional link features apply:
+
+- **Password:** a link with `password_hash` redirects only with a valid `shortly_unlock` cookie; otherwise GET shows a password page or `401 password_required`, and HEAD returns `401`. The visit limit is checked but not spent while locked. If the link is expired or used up and has a fallback, the visitor goes to the fallback without a password.
+- **Smart redirects:** the `302` target is the first matching `redirect_rules` entry for the visitor's device traits and `x-vercel-ip-country`, else `long_url`. Link previewers always get `long_url`, and fallbacks skip the rules.
+
+See [API](api.md#password-protected-links) for the unlock flow and rule format.
+
 Implement `HEAD /{code}` explicitly: same status and headers as GET, empty body, **no click event**. Invalid codes must never fall through to the frontend SPA. Error responses also use `no-store` so a missing code is not cached by clients before creation.
 
 ## Management and ownership

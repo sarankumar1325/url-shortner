@@ -10,6 +10,7 @@ Status: accounts, sessions, password rotation, workspace RBAC and lifecycle cont
 | Enumeration | Random codes, limits, no public listing | Short links are public; randomness is not authorization |
 | Link takeover | Workspace membership on every request, or a 256-bit legacy token hashed with HMAC | Browser XSS can act with the victim's session |
 | Credential stuffing / brute force | Argon2id, per-IP and per-account limits, uniform login failures | No MFA or breached-password check in v1 |
+| Link password guessing | Argon2id link password hashes, per-IP-and-code and per-code unlock limits that fail closed | Short link passwords (4 characters minimum) remain guessable over time; they gate a destination, not an account |
 | Account enumeration | Uniform `401 invalid_credentials`, dummy hash verification | Signup still reveals that an email is taken |
 | CSRF on cookie writes | `SameSite=Lax`, exact-Origin/Referer check, JSON-only bodies | Misconfigured allowed origin would weaken it |
 | Session theft | Opaque token in `HttpOnly` cookie, digest at rest, 30-day renewing expiry (24 hours without "Stay signed in"), server-side listing/revoke | No token rotation on renewal, theft detection or automatic role-change revocation |
@@ -40,6 +41,14 @@ Reject self-shortening to configured API/redirect hosts. Preserve path/query sem
 - Revoking a session is scoped by `user_id`; another user's session ID returns `404 session_not_found`. Revoking other sessions never deletes the current one.
 - Account deletion (`DELETE /auth/account`) requires the current password and the account email typed again, is same-origin checked and limited to 10/hour/user. It refuses (`409 owns_shared_workspaces`) while the user owns a shared workspace with other members, because ownership cannot be dropped silently. It deletes the personal workspace, sole-member workspaces and the user row in one transaction; sessions end with it and the cookie is cleared.
 - Session tokens are independent of `SECRET_KEY`; rotating the application secret invalidates legacy management tokens and replay ciphertexts but not active sessions. Revocation is explicit session-row deletion.
+
+### Link passwords
+
+- Link passwords are 4–128 characters and stored only as Argon2id hashes in `urls.password_hash`. API responses carry only `has_password`; the password and hash never appear in responses, logs, the redirect cache or idempotency rows. The create fingerprint uses a server-keyed HMAC of the password, so a replay row does not reveal it.
+- `POST /{code}` verifies the password and sets `shortly_unlock`: `HttpOnly`, `SameSite=Lax`, `Path=/{code}`, 12 hours, `Secure` in production/preview. The value is an expiry plus an HMAC over the code and a tag derived from the password hash, so it cannot be moved to another link and stops working when the password changes or is removed.
+- Unlock attempts are limited to 10 per 5 minutes per client IP and code and 100 per hour per code; the limiter fails closed. Wrong passwords get a generic message.
+- The password page escapes all output, runs no script and sends a CSP whose `form-action` allows `'self'` plus any HTTP(S) destination, because browsers apply `form-action` to the redirect after a successful unlock.
+- Peek, link unfurlers and public metadata reads never reveal a protected destination.
 
 ### CSRF and CORS
 
@@ -109,6 +118,8 @@ Implemented limits are per-IP or per-account and fail closed when Redis is unava
 | Workspace creation | 10 per hour per user |
 | Link creation, authenticated | 60 per minute per workspace |
 | Link creation, legacy anonymous | 20 per minute per IP |
+| Bulk link actions | 30 per minute per workspace |
+| Link unlock | 10 per 5 minutes per IP and code, 100 per hour per code |
 | Redirect | 600 per minute per IP |
 
 - These are burst limits, not durable abuse protection. Add durable global/per-code daily create caps and per-code management-attempt caps before broad public launch.

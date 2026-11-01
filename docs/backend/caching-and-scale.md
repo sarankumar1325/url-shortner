@@ -11,10 +11,12 @@ A successful warm GET normally needs **four Redis commands** in two HTTP calls: 
 ## Cache-aside
 
 ```text
-redir:{code} -> {"url_id": 42, "long_url": "https://…", "expires_at": null}
+redir:{code} -> {"url_id": 42, "long_url": "https://…", "expires_at": null, "fallback_url": null, "max_clicks": null}
 ```
 
-Only live, nondeleted, nonblocked links are cached, and writes happen only after a successful database read. The payload contains no tokens, users or workspace identifiers. Malformed JSON is a miss, not a redirect to an arbitrary value. `expires_at` is re-checked on every cache hit so an expired entry returns `410` even if cleanup lagged.
+Password-protected links add `"protected": true` and `"password_tag"`, an HMAC derived from the password hash that unlock cookies are checked against; the hash itself is never cached. Links with smart redirects add `"rules"` with the stored rule list, so rule matching needs no database read.
+
+Only live, nondeleted, nonblocked links are cached, and writes happen only after a successful database read. The payload contains no tokens, password hashes, users or workspace identifiers. Malformed JSON is a miss, not a redirect to an arbitrary value. `expires_at` is re-checked on every cache hit so an expired entry returns `410` even if cleanup lagged.
 
 Do not cache missing/inactive/deleted results in v1. A read racing with creation could otherwise publish a negative entry after invalidation and hide a freshly created alias. Abuse limits and indexed lookups handle unknown-code traffic; add negative caching only with a tested invalidation protocol.
 
@@ -24,7 +26,7 @@ Current implementation:
 
 - TTL is the configured `REDIRECT_CACHE_SECONDS` (default **60**) measured from the fill, via `SETEX`.
 - The TTL is **not** anchored to the database read start and is not capped by remaining link lifetime in the cache key. A slow read therefore adds its duration to the stale window. Worst-case staleness is bounded only approximately by TTL plus read/commit timing.
-- After a create/update/delete transaction commits, the route best-effort `DEL`s the positive key. A pre-mutation reader can repopulate old state **after** that `DEL`; invalidation is not linearizable and does not provide strict read-your-writes on redirects.
+- After a create/update/delete transaction commits, the route best-effort `DEL`s the positive key. Bulk pause, resume and delete evict every changed code in one pipelined `DEL` per 200 keys. As with other edits, a password or rule change can take up to the TTL to reach every redirect. A pre-mutation reader can repopulate old state **after** that `DEL`; invalidation is not linearizable and does not provide strict read-your-writes on redirects.
 - If a cached entry carries a past `expires_at`, the redirect returns `410` without a database read. If Redis is unavailable, the route reads Postgres directly.
 - Authenticated metadata and analytics read the database and show committed state immediately; only public redirects may lag.
 - During a database outage, existing cache hits continue until their TTL. Do not extend them or serve stale indefinitely.
@@ -46,6 +48,8 @@ The limiter is a fixed-window counter using `INCR` plus `EXPIRE … NX` on `rl:{
 | Link create, legacy anonymous | 20/minute/client IP | `503` if limiter unavailable |
 | Workspace create | 10/hour/user | `503` if limiter unavailable |
 | Invitation preview | 60/minute/client IP | `503` if limiter unavailable |
+| Bulk link actions | 30/minute/workspace | `503` if limiter unavailable |
+| Link unlock (`POST /{code}`) | 10 per 5 minutes per client IP and code, plus 100/hour/code | `503` if limiter unavailable |
 | Redirect GET | 600/minute/client IP | Fail open |
 
 Implementation notes and remaining gaps:

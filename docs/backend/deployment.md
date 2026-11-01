@@ -51,7 +51,7 @@ Alembic reads `DATABASE_URL_DIRECT` when set, otherwise `DATABASE_URL`, and conn
 (cd backend && uv run alembic current && uv run alembic upgrade head)
 ```
 
-Current production head is `c8e2f5a93b17` (session `persistent` flag and the `retired_short_codes` table), following `b9c4e2f71a83` (link fallback and visit limits) and the earlier session-ID, invitation-index and replay-cascade migrations. `c8e2f5a93b17` is expand-only: the `true` server default keeps inserts from the previous release valid. Never run migrations during function import, request handling or cold start. Use an expand/contract order so the previous backend revision keeps working during promotion; a failed migration needs a tested forward fix or an explicit safe rollback, not a blind downgrade.
+Current production head is `a4c7e2d91f06` (`urls.password_hash` and `urls.redirect_rules` with the `urls_redirect_rules_array` check), following `c8e2f5a93b17` (session `persistent` flag and the `retired_short_codes` table), `b9c4e2f71a83` (link fallback and visit limits) and the earlier session-ID, invitation-index and replay-cascade migrations. Both recent migrations are expand-only: `a4c7e2d91f06` adds only nullable columns, and `c8e2f5a93b17`'s `true` server default keeps inserts from the previous release valid, so the previous release keeps working. Never run migrations during function import, request handling or cold start. Use an expand/contract order so the previous backend revision keeps working during promotion; a failed migration needs a tested forward fix or an explicit safe rollback, not a blind downgrade.
 
 ## Function and cron configuration
 
@@ -185,7 +185,7 @@ Postgres is the source of truth; Redis is a transient buffer. A backup is not a 
 | Workspace lifecycle | Rename, ownership transfer (actor demoted to admin), personal-workspace guards, cross-tenant 404s, exact-name delete confirmation and hard delete verified |
 | Settings UI | Production browser checks: rename, wrong/valid password change, session list/revoke, transfer confirmation, delete fallback to personal workspace |
 | Scheduler | Authorized drain/maintenance calls succeeded; unauthorized calls returned 401 |
-| Schema | Alembic at `e7b3a9c14d52`; session public IDs applied and backfilled |
+| Schema | Alembic at `a4c7e2d91f06`, the current production head (see [migrations](#migrations)) |
 
 Durable stream ingestion is implemented and was verified locally against the live Neon/Upstash instances on 2026-10-25: enqueue → drain → committed click and rollup → `XACK`/`XDEL` → queue clear, with the synthetic click and rollup delta removed afterward. It has **not** been deployed to Vercel yet, so the hosted API still runs the previous list-based consumer until the release is promoted.
 

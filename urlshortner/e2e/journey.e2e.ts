@@ -16,13 +16,44 @@ async function writeClipboard(page: Page, value: string): Promise<void> {
 }
 
 async function signIn(page: Page, remember: boolean): Promise<void> {
-  await page.goto('/login')
-  await page.getByLabel('Email').fill(account.email)
-  await page.getByLabel('Password', { exact: true }).fill(account.password)
-  await page.getByLabel(/Stay signed in/).setChecked(remember)
-  await page.getByRole('button', { name: 'Sign in' }).click()
-  await expect(page.locator('#destination')).toBeVisible()
+  // The journey signs in more often than the per-account login limit allows
+  // in one minute, so wait out a 429 instead of failing.
+  for (let attempt = 0; ; attempt += 1) {
+    await page.goto('/login')
+    await page.getByLabel('Email').fill(account.email)
+    await page.getByLabel('Password', { exact: true }).fill(account.password)
+    await page.getByLabel(/Stay signed in/).setChecked(remember)
+    const login = page.waitForResponse((response) => response.url().includes('/api/v1/auth/login'))
+    await page.getByRole('button', { name: 'Sign in' }).click()
+    const response = await login
+    if (response.status() === 429 && attempt < 2) {
+      const wait = Math.min(Number(response.headers()['retry-after'] ?? '60'), 70) + 1
+      test.setTimeout(test.info().timeout + wait * 1000)
+      await page.waitForTimeout(wait * 1000)
+      continue
+    }
+    await expect(page.locator('#destination')).toBeVisible()
+    return
+  }
 }
+
+async function shorten(page: Page, url: string, password?: string): Promise<string> {
+  await page.goto('/')
+  await page.locator('#destination').fill(url)
+  if (password) {
+    await page.getByRole('button', { name: /Customize your link/ }).click()
+    await page.getByLabel('Require a password').check()
+    await page.getByLabel('Link password').fill(password)
+  }
+  await page.getByRole('button', { name: /Shorten link/ }).click()
+  await expect(page.getByRole('button', { name: 'Copy short link', exact: true })).toBeVisible()
+  return page.locator('.result-url').inputValue()
+}
+
+const IPHONE =
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1'
+const DESKTOP =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
 
 /** A browser restart keeps persistent cookies and storage, and drops session cookies. */
 async function restart(context: BrowserContext): Promise<BrowserContext> {
@@ -113,6 +144,67 @@ test('API responses carry Server-Timing', async ({ page }) => {
   const timing = response.headers()['server-timing'] ?? ''
   expect(timing).toMatch(/total;dur=\d/)
   expect(timing).toMatch(/db;dur=\d/)
+})
+
+test('palette, password links, smart redirects and bulk pause', async ({ page, context }) => {
+  test.setTimeout(180_000)
+  // Visitors never leave for the real destination.
+  await context.route('https://example.com/**', (route) =>
+    route.fulfill({ status: 200, contentType: 'text/html', body: '<h1>Arrived</h1>' }),
+  )
+  await signIn(page, true)
+
+  await page.keyboard.press('ControlOrMeta+K')
+  const search = page.getByRole('combobox', { name: 'Search links, pages and actions' })
+  await search.fill('Your links')
+  await search.press('Enter')
+  await expect(page).toHaveURL(/\/links$/)
+
+  const password = 'open-sesame-e2e'
+  const lockedUrl = await shorten(page, `${destination}&case=locked`, password)
+  const visitor = await context.newPage()
+  await visitor.goto(lockedUrl)
+  await expect(visitor.getByRole('heading', { name: 'This link is password protected' })).toBeVisible()
+  await visitor.getByLabel('Password').fill('not-the-password')
+  await visitor.getByRole('button', { name: 'Continue' }).click()
+  await expect(visitor.getByRole('alert')).toHaveText('That password is not right.')
+  await visitor.getByLabel('Password').fill(password)
+  await visitor.getByRole('button', { name: 'Continue' }).click()
+  await expect(visitor).toHaveURL(/example\.com\/e2e\/.*case=locked/)
+  await visitor.close()
+
+  const smartUrl = await shorten(page, `${destination}&case=smart`)
+  const smartCode = smartUrl.split('/').pop() ?? ''
+  await page.goto(`/links/${smartCode}`)
+  await page.getByRole('button', { name: 'Add rule' }).click()
+  await page.getByLabel('iPhone and iPad').check()
+  await page.getByLabel('Send these visitors to').fill('https://example.com/ios-app')
+  await page.getByRole('button', { name: 'Save rules' }).click()
+  await expect(page.getByText('Smart redirect rules saved.')).toBeVisible()
+  const asIphone = await page.request.get(smartUrl, { maxRedirects: 0, headers: { 'user-agent': IPHONE } })
+  const asDesktop = await page.request.get(smartUrl, { maxRedirects: 0, headers: { 'user-agent': DESKTOP } })
+  expect(asIphone.status()).toBe(302)
+  expect(asIphone.headers().location).toBe('https://example.com/ios-app')
+  expect(asDesktop.headers().location).toContain('case=smart')
+
+  const lockedCode = lockedUrl.split('/').pop() ?? ''
+  await page.goto('/links')
+  const lockedRow = page.locator('.link-row').filter({ hasText: lockedCode })
+  const smartRow = page.locator('.link-row').filter({ hasText: smartCode })
+  await expect(lockedRow).toContainText('Password')
+  await expect(smartRow).toContainText('Smart')
+  await page.getByLabel(`Select ${lockedCode}`).check()
+  await page.getByLabel(`Select ${smartCode}`).check()
+  const bar = page.getByRole('region', { name: 'Actions for selected links' })
+  await expect(bar).toContainText('2 selected')
+  await bar.getByRole('button', { name: 'Pause' }).click()
+  await expect(lockedRow).toContainText('Paused')
+  await expect(smartRow).toContainText('Paused')
+  const paused = await page.request.get(smartUrl, {
+    maxRedirects: 0,
+    headers: { 'user-agent': IPHONE, accept: 'application/json' },
+  })
+  expect(paused.status()).toBe(404)
 })
 
 test('signs out, rejects a wrong password, and signs back in', async ({ page }) => {

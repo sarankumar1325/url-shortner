@@ -24,8 +24,8 @@ Remaining gaps relative to the target:
 V1 is an authenticated multi-tenant SPA:
 
 - **Account:** email/password sign-up and sign-in with "Stay signed in", a personal workspace created automatically, sign-out, and self-service account deletion from Settings. There is no forgot-password flow.
-- **Workspaces:** switch between personal and shared workspaces; owners/admins create shared workspaces, invite people and manage roles.
-- **Links:** create with destination, optional alias and expiry; list workspace links with 30-day click counts; edit, pause/resume or delete with `member` or above.
+- **Workspaces:** switch between personal and shared workspaces from the command palette (⌘K/Ctrl+K); owners/admins create shared workspaces, invite people and manage roles.
+- **Links:** create with destination, optional alias, expiry, UTM fields and password; list workspace links with 30-day click counts; edit, pause/resume or delete with `member` or above, one at a time or in bulk; CSV import and export; smart redirect rules on the detail page.
 - **Understand:** totals, daily clicks, top referrer origins/countries and device categories. Breakdowns are V1, not future work.
 - **Legacy:** links created before accounts (or by unauthenticated API clients) still accept a management token on the detail page.
 
@@ -38,7 +38,7 @@ There are no server-rendered pages, password reset/email verification flows, tok
 | `/login` | Email/password sign-in, optional `next` return path | Anonymous; authenticated users are sent into the app |
 | `/signup` | Account creation with display name and password | Anonymous |
 | `/invite/:token` | Invitation preview and join, or sign-in/sign-up links | Public preview; joining requires a session |
-| `/` | Workspace shell: create form, link list and workspace switcher | Authenticated |
+| `/` | Workspace shell: create form and link list; workspaces are switched from the command palette | Authenticated |
 | `/links` | Full link list | Authenticated |
 | `/links/:code` | Metadata, analytics and management; legacy token entry when needed | Authenticated or legacy token |
 | `/members` | Members, roles and pending invitations | Authenticated; admin actions hidden by role |
