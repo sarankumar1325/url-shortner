@@ -15,7 +15,6 @@ import {
   ArrowUpRight,
   Check,
   ChevronDown,
-  CircleHelp,
   Copy,
   ExternalLink,
   Eye,
@@ -1828,14 +1827,6 @@ function WorkspaceShell() {
               onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
             >
               {theme === 'light' ? <Moon size={17} /> : <Sun size={17} />}
-            </button>
-            <button
-              type="button"
-              className="icon-button desktop-help"
-              aria-label="How Shortly works"
-              onClick={() => setHelp(true)}
-            >
-              <CircleHelp size={18} />
             </button>
           </div>
         </header>

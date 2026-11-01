@@ -1686,9 +1686,6 @@ kbd {
   .header-actions {
     gap: 0;
   }
-  .desktop-help {
-    display: none;
-  }
   .mobile-brand {
     gap: 6px;
   }
