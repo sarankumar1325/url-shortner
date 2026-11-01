@@ -9,8 +9,11 @@ with CircuitOpenError instead of each waiting out the HTTP timeout. Command
 errors (wrong type, NOGROUP) mean Redis answered, so they count as successes.
 """
 
+import time
+
 import httpx
 
+from backend.core import timing
 from backend.core.breaker import CircuitBreaker
 from backend.core.config import get_settings
 
@@ -42,11 +45,14 @@ class CircuitOpenError(RedisError):
 async def pipeline(commands: list[list[str | int | float | None]]) -> list:
     if not breaker.allow():
         raise CircuitOpenError("redis circuit is open")
+    started = time.perf_counter()
     try:
         response = await get_client().post("/pipeline", json=commands)
     except httpx.HTTPError as exc:
+        timing.add_redis((time.perf_counter() - started) * 1000)
         breaker.record_failure(type(exc).__name__)
         raise RedisError("upstash request failed") from exc
+    timing.add_redis((time.perf_counter() - started) * 1000)
     if response.status_code != 200:
         breaker.record_failure(f"http {response.status_code}")
         raise RedisError(f"upstash returned {response.status_code}")

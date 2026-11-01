@@ -1,6 +1,9 @@
+import time
 from collections.abc import AsyncIterator
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -8,6 +11,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from backend.core import timing
 from backend.core.config import get_settings
 
 _engine: AsyncEngine | None = None
@@ -35,6 +39,22 @@ def connect_args() -> dict:
     return {"ssl": True, "timeout": 10, "command_timeout": 10}
 
 
+def _before_execute(conn, cursor, statement, parameters, context, executemany) -> None:
+    context._shortly_started = time.perf_counter()
+
+
+def _after_execute(conn, cursor, statement, parameters, context, executemany) -> None:
+    started = getattr(context, "_shortly_started", None)
+    if started is not None:
+        timing.add_db((time.perf_counter() - started) * 1000)
+
+
+def instrument(engine: Engine) -> None:
+    """Feed query time into the request's Server-Timing header."""
+    event.listen(engine, "before_cursor_execute", _before_execute)
+    event.listen(engine, "after_cursor_execute", _after_execute)
+
+
 def get_engine() -> AsyncEngine:
     global _engine
     if _engine is None:
@@ -48,6 +68,7 @@ def get_engine() -> AsyncEngine:
             pool_recycle=300,
             connect_args=connect_args(),
         )
+        instrument(_engine.sync_engine)
     return _engine
 
 

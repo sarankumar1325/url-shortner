@@ -19,8 +19,11 @@ INVITATION_PREFIX = "shri_"
 TOKEN_BYTES = 32  # 256-bit management token
 SHORT_CODE_LENGTH = 5
 
-_PASSWORDS = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4)
-_DUMMY_HASH = _PASSWORDS.hash("shortly-dummy-password")
+# OWASP's Argon2id baseline (19 MiB, 2 passes, 1 lane). Hashes made with
+# other parameters still verify and are upgraded on the next sign-in.
+_PASSWORDS = PasswordHasher(time_cost=2, memory_cost=19456, parallelism=1)
+# Computed on first use so a cold start does not pay for a full hash.
+_dummy_hash: str | None = None
 
 
 def _derive(purpose: bytes) -> bytes:
@@ -69,10 +72,20 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
+def password_needs_rehash(password_hash: str) -> bool:
+    try:
+        return _PASSWORDS.check_needs_rehash(password_hash)
+    except InvalidHashError:
+        return True
+
+
 def verify_dummy_password(password: str) -> None:
     """Burn the same work as a real check so unknown emails are not faster."""
+    global _dummy_hash
+    if _dummy_hash is None:
+        _dummy_hash = _PASSWORDS.hash("shortly-dummy-password")
     try:
-        _PASSWORDS.verify(_DUMMY_HASH, password)
+        _PASSWORDS.verify(_dummy_hash, password)
     except (VerifyMismatchError, VerificationError, InvalidHashError):
         pass
 
