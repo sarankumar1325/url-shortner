@@ -109,6 +109,15 @@ Every row in Your links (on Overview and the links page) ends with Copy and a "M
 ### Dropdowns
 
 Every choice list in the app (sort, the Dashboard filter and sort, roles, owner transfer, abuse reasons, the QR studio and the tracer) uses `src/Select.tsx` instead of a native `<select>`, so the open list matches the theme. The trigger is a `combobox` button named by its `<label>` or `aria-label`, and the list is a `listbox` whose options can carry a hint line and group headings. Focus stays on the trigger: arrows, Page Up and Page Down, Home and End move the active option, typing jumps to a matching label, Enter or Space picks, and Esc closes without leaving a surrounding dialog. Lists and menus open in the browser's top layer (`popover="manual"`, placement in `src/listbox.ts`), so no panel or dialog clips them; they open below the trigger, or above when there is more room there, and stay inside the viewport.
+
+### Date fields
+
+The expiry field and the analytics From/To fields use `src/DatePicker.tsx` instead of a native date input. The trigger is a `combobox` button with `aria-haspopup="dialog"` that shows the chosen day ("Oct 24, 2026") or a placeholder. It opens a dialog in the top layer with a month title, previous and next month buttons and a `grid` of day buttons, each named with the full date. Focus moves to the chosen day, or today. Arrows move by a day or a week, Page Up and Page Down by a month (Shift for a year), Home and End to the start and end of the week, and Enter or Space picks. Tab stays inside the dialog, and Esc closes it without leaving a surrounding dialog, returning focus to the trigger. Days outside `min` and `max` are disabled: expiry allows today through five years ahead and has **Clear**, and the analytics range stops at today, with From limited to on or before To. All days are UTC calendar days (`src/calendar.ts`).
+
+### Loading states
+
+Lists, the link page, analytics, People, sessions, Top links and lazily loaded pages show placeholder shapes (`src/Skeleton.tsx`) instead of a "Loading…" box. Each placeholder is a `role="status"` region whose label is read to screen readers; the shapes are hidden from them, and the shimmer stops under `prefers-reduced-motion`. The link page draws its heading (destination domain, status and short link) from the links list while the full record loads, and the People count waits for the list instead of reading "0 people".
+
 ### Smart redirect rules
 
 The detail page's **Smart redirects** section (`src/SmartRulesEditor.tsx`, validation in `src/smartRules.ts`) edits up to 10 rules, each in a numbered card:
@@ -152,7 +161,7 @@ Mirror the [API validation rules](../backend/api.md) for UX, with server errors 
 - Password: at least 10 and at most 128 characters; show an accessible reveal control and allow paste, with a warning for leading/trailing whitespace in the pasted value.
 - Destination: absolute HTTP(S), no credentials/control characters, up to 8192 characters. Use `type="url"`, `inputMode="url"`, no auto-capitalization; do not claim client checks prove a target safe.
 - Alias: 3–32 lowercase letters/digits/`_`/`-`, alphanumeric ends; show a short-URL preview and reserved-name guidance.
-- Expiry: optional future time, at most five years ahead. A `datetime-local` input must identify the user's timezone and convert to a UTC timestamp; handle invalid/ambiguous local times instead of appending `Z` to local input.
+- Expiry: an optional UTC calendar day from today to five years ahead, picked in the date field; the link expires at the end of that UTC day.
 - Workspace name: 1–80 visible characters after whitespace normalization; show the trimmed result before submit.
 - Map server `errors[]` by `field`; show unrecognized fields in the form summary. Use `aria-invalid` and `aria-describedby` and focus the first invalid field after submission.
 - Distinguish 409 codes: `email_taken`, `alias_taken`, `request_in_progress` and `idempotency_conflict` each have different recovery copy. Network failure preserves the existing create key/body. A body or workspace change starts a new request and warns about the uncertain previous outcome.

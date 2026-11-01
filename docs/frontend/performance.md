@@ -28,6 +28,7 @@ Establish a repeatable lab baseline on a documented mobile device/throttling pro
 - Bound visible workspace-link rows and their metadata requests; do not fetch every link's analytics on startup. The workspace list already carries `clicks_30d`, so the home list needs no per-link analytics request.
 - The sign-in and sign-up pages call `warmUp()` (`GET /api/v1/ready`) once on mount, so the API's cold start and the database wake-up overlap with typing rather than with the submit.
 - On reload, the shell renders from the cached account summary (`shortly.session.v1`) and starts the workspace link request in parallel with `/auth/me`, removing one serial round trip before links appear. The cache holds no credential; a `401` clears it.
+- The last links list of each workspace is saved in sessionStorage (`src/linksCache.ts`, `shortly.links.v1:<workspace id>`, at most 500 links, ignored after 12 hours). A reload or a return to the tab draws the list at once and refreshes it in the background without a placeholder; the fresh copy replaces it and keeps analytics already loaded. If the refresh fails, the saved list stays and a toast says so.
 - Add preconnect only if a measured API-origin handshake is on the critical path; no blanket hints for preview or unrelated origins. In production the API is same-origin behind the rewrite, so no cross-origin preconnect is needed.
 
 ## Cache efficiency must preserve authorization
@@ -38,7 +39,7 @@ Correctness comes first:
 
 - Public metadata, workspace-scoped link data and legacy-token data use distinct keys. Workspace keys include the workspace ID; legacy keys include code and a non-secret credential generation; analytics also includes the validated UTC range/interval. Tokens or token hashes must never be key material.
 - On sign-out, session expiry, workspace switch or legacy-token replacement/rejection/forget, cancel/remove private queries and clear their displayed/retained results. Ignore late responses from old scopes, including stale 401s that must not reject a newer credential. Apply the same behavior across tabs for legacy tokens.
-- Never persist Query data or token-bearing mutation results. Browser localStorage is limited to the active workspace ID, the token-free account summary and explicit legacy-token remembrance; memory is the default.
+- Never persist analytics or token-bearing mutation results. Browser localStorage is limited to the active workspace ID, the token-free account summary and explicit legacy-token remembrance. The only persisted query data is the token-free links list in sessionStorage, which is validated on read, written only from a successful fetch for the same workspace, and cleared whenever the app becomes signed out; memory is the default for everything else.
 - Retain last successful analytics while a same-scope refresh/range request is pending, labeled with its real range and an updating/error state. Do not reuse it across codes, workspaces or credentials, or after authoritative access/state rejection.
 - Do not prefetch analytics without an authorized scope or let a fresh old cache entry hide a rejected replacement credential. Test that supplying a session to metadata actually scopes the read to the requested workspace.
 

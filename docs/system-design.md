@@ -34,6 +34,7 @@ flowchart LR
 | Server-Timing | Every response reports Postgres and Redis time and call counts plus the total, visible in the browser's Network panel. | Covers work done before the response starts, not streaming. | `backend/src/backend/core/timing.py` |
 | Warm-up on auth pages | The login and signup pages fetch `/api/v1/ready` once on mount, so a cold function and database start while the user types. | One extra request per visit. | `urlshortner/src/api.ts` |
 | Cached app shell | The last account summary (no token) is kept in localStorage; on reload the shell renders from it and links load in parallel with `/auth/me`. A `401` clears it. | The shell can show stale workspace names for one round trip. | `urlshortner/src/sessionCache.ts` |
+| Saved links list | The last links list per workspace (link fields only) is kept in sessionStorage; a reload draws it at once and refreshes it in the background. Sign-out clears it. | A link changed in another tab shows its old state until the refresh lands. | `urlshortner/src/linksCache.ts` |
 
 ## Reliability
 

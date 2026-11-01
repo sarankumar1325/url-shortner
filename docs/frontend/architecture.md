@@ -54,6 +54,7 @@ Only the link code and validated UTC date-only `from`/`to` values may appear in 
 - The session is an `HttpOnly` cookie. JavaScript never reads, stores or logs it; every request uses `credentials: 'include'` against the same-origin `/api` base.
 - `AuthProvider` calls `GET /api/v1/auth/me` on load, then exposes `status` (`loading`/`authenticated`/`anonymous`), `session`, `verified`, the active workspace and its role.
 - `src/sessionCache.ts` stores the last account summary (user and workspace list, never a token) in `localStorage` under `shortly.session.v1`. On startup the shell renders from it with `verified: false`, and the workspace links load in parallel with `/auth/me` instead of after it. When `/auth/me` answers, the summary is replaced and `verified` becomes true; a `401` clears the cache and sends the user to sign-in; a network or server failure keeps the cached shell rather than signing out. The sign-in page only redirects into the app once the session is verified.
+- `src/linksCache.ts` keeps the last links list of each workspace in `sessionStorage` under `shortly.links.v1:<workspace id>`. On a workspace change the app draws the saved list, if any, and refreshes it quietly; the copy is written only after a successful fetch for that same workspace, and `AuthProvider` clears every copy whenever the status becomes `anonymous`.
 - `auth.forget(notice)` clears local session state and the cache without a server call and shows the notice once on the sign-in page; account deletion uses it.
 - The active workspace is sent as `X-Workspace-Id`. Its ID is remembered in `localStorage` under `shortly.workspace.v1`; it is non-secret UI preference, not authorization. If the remembered workspace is no longer accessible, selection falls back to the personal workspace.
 - Sign-in/sign-up applies the returned session and selects a workspace. Sign-out clears server and client state, including the cached summary; the protected tree unmounts, so link and analytics state cannot survive into the next account.
@@ -81,7 +82,7 @@ The API is authoritative; the UI hides or disables controls it knows will fail.
 
 ## Credential and cache boundary
 
-Account access is cookie-based and must never be mirrored into JavaScript storage. The workspace ID and the cached account summary in localStorage are safe because they grant nothing on their own; the summary does hold the email and workspace names, so it is cleared on sign-out, `401` and account deletion.
+Account access is cookie-based and must never be mirrored into JavaScript storage. The workspace ID and the cached account summary in localStorage are safe because they grant nothing on their own; the summary does hold the email and workspace names, so it is cleared on sign-out, `401` and account deletion. The saved links lists in sessionStorage hold destinations and tags, so they are cleared on the same events.
 
 Legacy management tokens remain a separate capability:
 

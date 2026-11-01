@@ -24,6 +24,8 @@ import {
   type RangePreset,
 } from './ranges'
 import { ClickChart } from './ClickChart'
+import Skeleton from './Skeleton'
+import DatePicker from './DatePicker'
 
 function formatUtc(value: string): string {
   return new Date(value).toLocaleString('en-US', {
@@ -239,23 +241,24 @@ export default function LinkAnalytics({
     <form className="custom-range panel" id="analytics-custom-range" onSubmit={chooseCustom} noValidate>
       <div>
         <label htmlFor="analytics-from">From</label>
-        <input
+        <DatePicker
           id="analytics-from"
-          type="date"
           value={customFrom}
-          max={today}
-          onChange={(event) => setCustomFrom(event.target.value)}
+          max={customTo || today}
+          placeholder="Start date"
+          onChange={setCustomFrom}
           aria-describedby="analytics-range-hint"
         />
       </div>
       <div>
         <label htmlFor="analytics-to">To</label>
-        <input
+        <DatePicker
           id="analytics-to"
-          type="date"
           value={customTo}
+          min={customFrom || undefined}
           max={today}
-          onChange={(event) => setCustomTo(event.target.value)}
+          placeholder="End date"
+          onChange={setCustomTo}
           aria-describedby="analytics-range-hint"
         />
       </div>
@@ -286,9 +289,7 @@ export default function LinkAnalytics({
             </button>
           </div>
         ) : (
-          <div className="loading-panel" role="status" aria-busy="true">
-            Loading analytics…
-          </div>
+          <Skeleton label="Loading analytics…" variant="chart" />
         )}
       </section>
     )

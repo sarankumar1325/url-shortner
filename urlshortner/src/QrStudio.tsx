@@ -49,6 +49,7 @@ import { canCopyImages, copyPng, exportQr, saveBlob, type PdfOptions } from './q
 import { copyText, fullUrl } from './clipboard'
 import { useCopy } from './copyContext'
 import Select, { type SelectOption } from './Select'
+import Skeleton from './Skeleton'
 import './explore.css'
 
 const ECC_OPTIONS: SelectOption<QRCodeErrorCorrectionLevel>[] = [
@@ -404,9 +405,7 @@ export default function QrStudio({
       </div>
 
       {loading ? (
-        <div className="loading-panel" role="status" aria-busy="true">
-          Loading links…
-        </div>
+        <Skeleton label="Loading links…" variant="block" />
       ) : (
         <>
           <div className="qr-studio">

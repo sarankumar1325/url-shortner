@@ -35,6 +35,7 @@ import {
 } from './api'
 import { useAuth } from './auth'
 import Select from './Select'
+import Skeleton from './Skeleton'
 
 const ROLE_LABEL: Record<WorkspaceRole, string> = {
   owner: 'Owner',
@@ -541,9 +542,7 @@ export default function SettingsPage() {
               </div>
             )}
             {sessionsLoading ? (
-              <div className="loading-panel" role="status" aria-busy="true">
-                Loading sessions…
-              </div>
+              <Skeleton label="Loading sessions…" rows={2} bare />
             ) : (
               <div className="session-list">
                 {sessions.map((session) => (

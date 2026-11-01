@@ -518,9 +518,7 @@ label {
   outline: none;
   font-size: 13px;
 }
-.form-options input[type='date'],
-.password-field input[type='password'],
-.custom-range input[type='date'] {
+.password-field input[type='password'] {
   width: 100%;
   height: 42px;
   border: 1px solid var(--control);
@@ -1786,6 +1784,9 @@ kbd {
     column-gap: 20px;
     padding: 22px;
   }
+  .analytics-teaser.empty {
+    display: flex;
+  }
   .analytics-teaser > .section-heading {
     grid-column: 1;
   }
@@ -1927,8 +1928,7 @@ kbd {
   .form-options {
     grid-template-columns: 1fr;
   }
-  .alias-input input,
-  .form-options input[type='date'] {
+  .alias-input input {
     font-size: 14px;
   }
   .privacy-note {
@@ -1953,6 +1953,9 @@ kbd {
   }
   .analytics-teaser h2 {
     font-size: 13px;
+  }
+  .analytics-teaser.empty h2 {
+    font-size: 17px;
   }
   .analytics-teaser > .section-heading > svg {
     display: none;
@@ -2172,12 +2175,10 @@ kbd {
   }
   .destination-input input,
   .alias-input input,
-  .form-options input[type='date'],
   .search-field input {
     font-size: 16px;
   }
   .alias-input,
-  .form-options input[type='date'],
   .search-field {
     min-height: 44px;
   }
@@ -3498,7 +3499,21 @@ button:disabled {
   color: var(--muted);
 }
 .report-form textarea {
-  border-color: var(--border);
+  display: block;
+  width: 100%;
+  min-height: 108px;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--raised);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.6;
+  resize: vertical;
+  transition: border-color 150ms;
+}
+.report-form textarea:hover {
+  border-color: var(--control);
 }
 .report-form textarea.invalid,
 .report-form textarea[aria-invalid='true'] {
@@ -4216,5 +4231,237 @@ button:disabled {
   .select-option,
   .menu-item {
     min-height: 42px;
+  }
+}
+
+/* Loading placeholders */
+.skeleton-panel {
+  margin-top: 24px;
+  padding: 8px 22px;
+  border-radius: var(--radius-card);
+  background: var(--surface);
+}
+.skeleton-panel.bare {
+  margin-top: 0;
+  padding: 0;
+  background: none;
+}
+.skeleton-block {
+  display: block;
+  height: 12px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--active), var(--raised), var(--active));
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s linear infinite;
+}
+.skeleton-inline {
+  display: inline-block;
+  width: 150px;
+  height: 10px;
+  vertical-align: middle;
+}
+@keyframes skeleton-shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+.skeleton-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--rule);
+}
+.skeleton-row:last-child {
+  border-bottom: 0;
+}
+.skeleton-avatar {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+}
+.skeleton-lines {
+  display: grid;
+  flex: 1;
+  gap: 9px;
+  min-width: 0;
+}
+.skeleton-lines > :first-child {
+  width: 52%;
+}
+.skeleton-lines > :last-child {
+  width: 34%;
+  height: 10px;
+}
+.skeleton-row:nth-child(3n) .skeleton-lines > :first-child {
+  width: 44%;
+}
+.skeleton-row:nth-child(3n + 1) .skeleton-lines > :first-child {
+  width: 61%;
+}
+.skeleton-row:nth-child(2n) .skeleton-lines > :last-child {
+  width: 27%;
+}
+.skeleton-chip {
+  flex: none;
+  width: 64px;
+  height: 22px;
+  border-radius: 999px;
+}
+.skeleton-chart-body,
+.skeleton-block-body {
+  display: grid;
+  gap: 16px;
+  padding: 16px 0;
+}
+.skeleton-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.skeleton-metrics > .skeleton-block {
+  height: 64px;
+  border-radius: 12px;
+}
+.skeleton-plot {
+  height: 180px;
+  border-radius: 12px;
+}
+.skeleton-block-body > :first-child {
+  width: 28%;
+}
+.skeleton-block-body > :nth-child(2) {
+  width: 62%;
+  height: 22px;
+}
+.skeleton-block-body > :last-child {
+  width: 44%;
+}
+@media (max-width: 480px) {
+  .skeleton-panel {
+    padding: 4px 16px;
+  }
+  .skeleton-chip {
+    display: none;
+  }
+  .skeleton-plot {
+    height: 130px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-block {
+    animation: none;
+  }
+}
+
+/* Date picker */
+.date-icon {
+  flex: none;
+  color: var(--muted);
+}
+.form-options .date-trigger,
+.custom-range .date-trigger {
+  height: 42px;
+}
+.date-trigger[aria-invalid='true'] {
+  border-color: var(--negative);
+}
+.date-panel {
+  width: 292px;
+  padding: 10px;
+}
+.date-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.date-title {
+  font-weight: 500;
+}
+.date-nav {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--muted);
+}
+.date-nav:hover:not(:disabled) {
+  background: var(--active);
+  color: var(--text);
+}
+.date-nav:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.date-nav:disabled {
+  opacity: 0.3;
+}
+.date-grid {
+  display: grid;
+  gap: 2px;
+}
+.date-row {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 2px;
+}
+.date-weekday {
+  padding: 4px 0;
+  font-size: 11px;
+  color: var(--faint);
+  text-align: center;
+}
+.date-day {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  aspect-ratio: 1;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--text);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.date-day.outside {
+  color: var(--faint);
+}
+.date-day:hover:not(:disabled) {
+  background: var(--active);
+}
+.date-day:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.date-day[aria-current='date'] {
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px var(--control);
+}
+[aria-selected='true'] > .date-day,
+[aria-selected='true'] > .date-day:hover {
+  background: var(--primary);
+  color: var(--on-primary);
+  box-shadow: none;
+}
+.date-day:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+.date-footer {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--rule);
+}
+@media (pointer: coarse) {
+  .date-trigger {
+    min-height: 44px;
   }
 }

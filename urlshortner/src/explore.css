@@ -147,6 +147,14 @@
   background-size: 200% 100%;
   animation: shimmer 1.4s linear infinite;
 }
+.live-metric.skeleton::after {
+  display: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .live-metric.skeleton {
+    animation: none;
+  }
+}
 @keyframes shimmer {
   to {
     background-position: -200% 0;

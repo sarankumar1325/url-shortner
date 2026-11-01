@@ -94,6 +94,7 @@ import {
   parseTags,
   previewUrl,
   recordFromMetadata,
+  refreshRecords,
   statusClass,
   titleFor,
   validateDraft,
@@ -119,6 +120,11 @@ import { copyText, fullUrl, pasteIsForPage, urlFromPaste } from './clipboard'
 import { CopyContext } from './copyContext'
 import { useAliasAvailability } from './aliasAvailability'
 import TopLinks from './TopLinks'
+import Skeleton from './Skeleton'
+import DatePicker from './DatePicker'
+import { shiftMonth } from './calendar'
+import { utcDay } from './ranges'
+import { browserSessionStorage, readCachedLinks, writeCachedLinks } from './linksCache'
 import Sidebar from './Sidebar'
 import {
   readSidebarCollapsed,
@@ -154,11 +160,7 @@ function routeTitle(pathname: string): [string, string] {
 }
 
 function PageLoading({ label }: { label: string }) {
-  return (
-    <div className="loading-panel" role="status" aria-busy="true">
-      {label}
-    </div>
-  )
+  return <Skeleton label={label} variant="block" />
 }
 
 type Attempt = { key: string; body: CreateBody }
@@ -244,6 +246,10 @@ function CreateForm({
   const [alias, setAlias] = useState('')
   const aliasState = useAliasAvailability(alias)
   const [expiry, setExpiry] = useState('')
+  const [expiryBounds] = useState(() => {
+    const today = utcDay(new Date())
+    return { min: today, max: shiftMonth(today, 60) }
+  })
   const [tagInput, setTagInput] = useState('')
   const [campaign, setCampaign] = useState<Required<CampaignFields>>(
     () => (pasted ? campaignFromUrl(pasted) : null) ?? { ...EMPTY_CAMPAIGN },
@@ -726,12 +732,15 @@ function CreateForm({
               <label htmlFor="expires-at">
                 Expires after <span className="meta">(UTC)</span>
               </label>
-              <input
-                type="date"
+              <DatePicker
                 id="expires-at"
                 value={expiry}
-                onChange={(event) => {
-                  setExpiry(event.target.value)
+                min={expiryBounds.min}
+                max={expiryBounds.max}
+                placeholder="No expiry"
+                clearable
+                onChange={(next) => {
+                  setExpiry(next)
                   edit()
                   if (errors.expiresAt)
                     setErrors({ ...errors, expiresAt: undefined })
@@ -954,10 +963,13 @@ function DetailPage({
   onLoaded,
   onDeleted,
   notify,
+  listed,
 }: {
   workspaceId: string
   workspaceName: string
   canEdit: boolean
+  /** Links already in the list, so the heading can draw before the fetch. */
+  listed: LinkRecord[]
   onCopy: (value: string) => void
   onLoaded: (link: LinkRecord) => void
   onDeleted: (code: string) => void
@@ -1198,6 +1210,8 @@ function DetailPage({
   }
 
   if (!link) {
+    const preview = error ? undefined : listed.find((item) => item.code === code)
+    const previewStatus = preview ? getLinkStatus(preview) : null
     return (
       <>
         <div className="page-heading detail-heading">
@@ -1205,14 +1219,26 @@ function DetailPage({
             <ArrowLeft size={15} /> All links
           </Link>
           <div className="section-heading">
-            <h1 tabIndex={-1}>{code || 'Link details'}</h1>
+            <h1 tabIndex={-1}>
+              {(preview && titleFor(preview.destination)) || code || 'Link details'}
+            </h1>
+            {previewStatus && (
+              <span className={`status ${statusClass(previewStatus)}`}>
+                <span className="status-dot" />
+                {previewStatus}
+              </span>
+            )}
           </div>
-          {error ? <p>{error}</p> : <p>One link. A little more insight.</p>}
+          {error ? (
+            <p>{error}</p>
+          ) : (
+            <p>
+              {preview?.shortUrl ? displayShortUrl(preview.shortUrl) : code} in {workspaceName}
+            </p>
+          )}
         </div>
         {loading ? (
-          <div className="loading-panel" role="status" aria-busy="true">
-            Loading link metadata…
-          </div>
+          <Skeleton label="Loading link…" variant="block" />
         ) : (
           <div className="panel inline-alert" role="alert">
             <AlertCircle size={19} />
@@ -1249,7 +1275,7 @@ function DetailPage({
           </span>
         </div>
         <p>
-          {workspaceName} · one link, a little more insight.
+          {link.shortUrl ? displayShortUrl(link.shortUrl) : link.code} in {workspaceName}
         </p>
       </div>
       {error && (
@@ -1341,11 +1367,7 @@ function DetailPage({
       )}
       {link.analytics ? (
         <Suspense
-          fallback={
-            <div className="loading-panel" role="status" aria-busy="true">
-              Loading analytics…
-            </div>
-          }
+          fallback={<Skeleton label="Loading analytics…" variant="chart" />}
         >
           <LinkAnalytics link={link} workspaceId={workspaceId} />
         </Suspense>
@@ -1361,9 +1383,7 @@ function DetailPage({
             </div>
           </div>
           {analyticsLoading ? (
-            <div className="loading-panel" role="status" aria-busy="true">
-              Loading analytics…
-            </div>
+            <Skeleton label="Loading analytics…" variant="chart" />
           ) : (
             <div className="panel analytics-empty" role="alert">
               <AlertCircle size={22} strokeWidth={1.5} />
@@ -1735,6 +1755,8 @@ function WorkspaceShell() {
 
   const [links, setLinks] = useState<LinkRecord[]>([])
   const [listLoading, setListLoading] = useState(true)
+  // The workspace whose server list is in `links`; gates writes to the saved copy.
+  const [syncedWorkspace, setSyncedWorkspace] = useState<string | null>(null)
   const [listError, setListError] = useState('')
   const [composerVersion, setComposerVersion] = useState(0)
   const [, setDayTick] = useState(0)
@@ -1818,14 +1840,16 @@ function WorkspaceShell() {
   const refreshSession = auth.refresh
 
   const loadLinks = useCallback(
-    async (signal: AbortSignal) => {
+    async (signal: AbortSignal, { quiet = false }: { quiet?: boolean } = {}) => {
       if (!workspaceId) return
-      setListLoading(true)
+      // A quiet refresh keeps the saved list on screen instead of a placeholder.
+      setListLoading(!quiet)
       setListError('')
       try {
         const result = await listLinks(workspaceId, signal)
         if (signal.aborted) return
-        setLinks(result.links.map((item) => recordFromMetadata(item)))
+        setLinks((current) => refreshRecords(current, result.links))
+        setSyncedWorkspace(workspaceId)
       } catch (failure) {
         if (isProblem(failure) && failure.problem.kind === 'cancelled') return
         if (isProblem(failure) && failure.problem.status === 401) {
@@ -1836,7 +1860,8 @@ function WorkspaceShell() {
           }
           return
         }
-        setListError(describeError(failure))
+        if (quiet) setNotice(`Showing saved links. ${describeError(failure)}`)
+        else setListError(describeError(failure))
       } finally {
         if (!signal.aborted) setListLoading(false)
       }
@@ -1846,10 +1871,17 @@ function WorkspaceShell() {
 
   useEffect(() => {
     const controller = new AbortController()
-    setLinks([])
-    void loadLinks(controller.signal)
+    const saved = readCachedLinks(browserSessionStorage(), workspaceId)
+    setLinks(saved ?? [])
+    setSyncedWorkspace(null)
+    void loadLinks(controller.signal, { quiet: saved !== null })
     return () => controller.abort()
-  }, [loadLinks])
+  }, [loadLinks, workspaceId])
+
+  useEffect(() => {
+    if (syncedWorkspace && syncedWorkspace === workspaceId)
+      writeCachedLinks(browserSessionStorage(), syncedWorkspace, links)
+  }, [links, syncedWorkspace, workspaceId])
 
   const loadAnalytics = useCallback(
     async (code: string) => {
@@ -2338,13 +2370,7 @@ function WorkspaceShell() {
                   </div>
                   <TopLinks workspaceId={workspaceId} />
                   {listLoading ? (
-                    <div
-                      className="loading-panel"
-                      role="status"
-                      aria-busy="true"
-                    >
-                      Loading links…
-                    </div>
+                    <Skeleton label="Loading links…" />
                   ) : listError ? (
                     <div className="panel inline-alert" role="alert">
                       <AlertCircle size={19} />
@@ -2403,13 +2429,7 @@ function WorkspaceShell() {
                     </p>
                   </div>
                   {listLoading ? (
-                    <div
-                      className="loading-panel"
-                      role="status"
-                      aria-busy="true"
-                    >
-                      Loading links…
-                    </div>
+                    <Skeleton label="Loading links…" />
                   ) : listError ? (
                     <div className="panel inline-alert" role="alert">
                       <AlertCircle size={19} />
@@ -2462,23 +2482,14 @@ function WorkspaceShell() {
                   onLoaded={handleLoaded}
                   onDeleted={handleDeleted}
                   notify={setNotice}
+                  listed={links}
                 />
               }
             />
             <Route
               path="/members"
               element={
-                <Suspense
-                  fallback={
-                    <div
-                      className="loading-panel"
-                      role="status"
-                      aria-busy="true"
-                    >
-                      Loading people…
-                    </div>
-                  }
-                >
+                <Suspense fallback={<PageLoading label="Loading people…" />}>
                   <MembersPage />
                 </Suspense>
               }
@@ -2486,17 +2497,7 @@ function WorkspaceShell() {
             <Route
               path="/settings"
               element={
-                <Suspense
-                  fallback={
-                    <div
-                      className="loading-panel"
-                      role="status"
-                      aria-busy="true"
-                    >
-                      Loading settings…
-                    </div>
-                  }
-                >
+                <Suspense fallback={<PageLoading label="Loading settings…" />}>
                   <SettingsPage key={workspaceId} />
                 </Suspense>
               }

@@ -174,7 +174,7 @@ export function ClickChart({
 export function AnalyticsTeaser({ link }: { link: LinkRecord | undefined }) {
   if (!link || !link.analytics)
     return (
-      <aside className="analytics-teaser panel">
+      <aside className="analytics-teaser empty panel">
         <MousePointer2 size={20} strokeWidth={1.5} />
         <h2>There’s a story in every click.</h2>
         <p>
@@ -184,9 +184,6 @@ export function AnalyticsTeaser({ link }: { link: LinkRecord | undefined }) {
               ? 'Analytics are unavailable for this link right now.'
               : 'Create a link and its first clicks will show up here.'}
         </p>
-        <span className="meta">
-          Analytics appear as soon as this workspace has a click.
-        </span>
       </aside>
     )
   const series = getSeries(link, 7)

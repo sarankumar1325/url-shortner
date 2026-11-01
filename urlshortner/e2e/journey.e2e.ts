@@ -104,6 +104,18 @@ test('pastes into the destination field and anywhere on the page', async ({ page
 test('creates a link, focuses Copy link, and copies the full URL', async ({ page }) => {
   await signIn(page, true)
   await page.locator('#destination').fill(destination)
+
+  // The expiry date picker: keyboard opens on today, a week down picks it.
+  await page.getByRole('button', { name: /Customize your link/ }).click()
+  const expiry = page.locator('#expires-at')
+  await expiry.click()
+  await expect(page.getByRole('dialog', { name: /Choose Expires after/ })).toBeVisible()
+  await page.keyboard.press('ArrowDown')
+  await page.keyboard.press('Enter')
+  await expect(expiry).toHaveAttribute('aria-expanded', 'false')
+  await expect(expiry).toBeFocused()
+  await expect(expiry).toHaveText(/[A-Z][a-z]{2} \d{1,2}, \d{4}/)
+
   await page.getByRole('button', { name: /Shorten link/ }).click()
 
   const copyButton = page.getByRole('button', { name: 'Copy short link', exact: true })

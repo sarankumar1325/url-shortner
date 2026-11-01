@@ -28,6 +28,7 @@ import { useAuth } from './auth'
 import { copyText } from './clipboard'
 import { useCopy } from './copyContext'
 import Select, { type SelectOption } from './Select'
+import Skeleton from './Skeleton'
 
 const ROLE_LABEL: Record<WorkspaceRole, string> = {
   owner: 'Owner',
@@ -282,16 +283,20 @@ export default function MembersPage() {
             <div>
               <h2 id="members-heading">Members</h2>
               <p className="meta">
-                {members.length} {members.length === 1 ? 'person' : 'people'} in
-                this workspace.
+                {loading ? (
+                  <span className="skeleton-block skeleton-inline" aria-hidden="true" />
+                ) : (
+                  <>
+                    {members.length} {members.length === 1 ? 'person' : 'people'} in
+                    this workspace.
+                  </>
+                )}
               </p>
             </div>
             <Users size={19} strokeWidth={1.5} />
           </div>
           {loading ? (
-            <div className="loading-panel" role="status" aria-busy="true">
-              Loading members…
-            </div>
+            <Skeleton label="Loading members…" rows={3} bare />
           ) : (
             <div className="member-list">
               {members.map((member) => (

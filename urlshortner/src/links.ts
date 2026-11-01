@@ -102,6 +102,27 @@ export function recordFromMetadata(
   }
 }
 
+/**
+ * Replace the list with a fresh server copy, keeping analytics already
+ * loaded (or loading) for links that are still there.
+ */
+export function refreshRecords(
+  current: LinkRecord[],
+  fresh: LinkMetadata[],
+): LinkRecord[] {
+  const previous = new Map(current.map((item) => [item.code, item]))
+  return fresh.map((metadata) => {
+    const record = recordFromMetadata(metadata)
+    const known = previous.get(record.code)
+    if (!known) return record
+    return {
+      ...record,
+      analytics: known.analytics,
+      analyticsLoading: known.analyticsLoading,
+      analyticsError: known.analyticsError,
+    }
+  })
+}
 export function applyMetadata(
   link: LinkRecord,
   metadata: LinkMetadata,

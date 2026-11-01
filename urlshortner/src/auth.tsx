@@ -27,6 +27,7 @@ import {
   type AuthState,
   type AuthStatus,
 } from './sessionCache'
+import { browserSessionStorage, clearCachedLinks } from './linksCache'
 
 const ACTIVE_WORKSPACE_KEY = 'shortly.workspace.v1'
 
@@ -122,6 +123,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Keeps the cached summary in step with local edits (rename, new workspace).
   useEffect(() => {
     if (status === 'authenticated' && session) writeCachedSession(browserStorage(), session)
+    // Saved link lists belong to whoever was signed in; drop them on any sign-out.
+    if (status === 'anonymous') clearCachedLinks(browserSessionStorage())
   }, [status, session])
 
   const refresh = useCallback(async () => {

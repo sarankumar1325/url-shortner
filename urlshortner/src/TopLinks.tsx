@@ -5,6 +5,7 @@ import { getTopLinks, isProblem, type TopLinks as TopLinksData } from './api'
 import { fullUrl } from './clipboard'
 import { useCopy } from './copyContext'
 import { displayShortUrl, titleFor } from './links'
+import Skeleton from './Skeleton'
 
 type Days = 1 | 7 | 30
 const RANGES: { value: Days; label: string }[] = [
@@ -64,9 +65,7 @@ export default function TopLinks({ workspaceId }: { workspaceId: string }) {
         </div>
       </div>
       {!current ? (
-        <p className="meta top-empty" role="status" aria-busy="true">
-          Ranking links…
-        </p>
+        <Skeleton label="Ranking links…" rows={3} bare />
       ) : current.error ? (
         <p className="meta top-empty" role="status">
           {current.error}
