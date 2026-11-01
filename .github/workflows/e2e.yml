@@ -1,0 +1,47 @@
+name: E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: Web app URL to test (creates and then deletes a qa-droid account)
+        required: true
+        default: https://shortlyyy-web.vercel.app
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ inputs.base_url }}
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    name: Playwright
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: urlshortner
+    env:
+      E2E_BASE_URL: ${{ inputs.base_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Install Chromium
+        run: bunx playwright install --with-deps chromium
+      - name: Run E2E
+        run: bun run e2e
+      - name: Upload report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            urlshortner/playwright-report
+            urlshortner/test-results
+          retention-days: 7
