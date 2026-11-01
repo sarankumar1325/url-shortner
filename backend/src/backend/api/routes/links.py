@@ -1,9 +1,10 @@
 from datetime import UTC, date, datetime, timedelta
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.deps import (
@@ -16,7 +17,7 @@ from backend.api.deps import (
     require_idempotency_key,
     validate_body_size,
 )
-from backend.api.routes.redirect import invalidate_cache
+from backend.api.routes.redirect import invalidate_cache, invalidate_caches
 from backend.core.config import get_settings
 from backend.core.problems import APIError
 from backend.services import leaderboard, ratelimit
@@ -29,6 +30,7 @@ router = APIRouter(prefix="/links", tags=["links"])
 CREATE_LIMIT_WORKSPACE = 60
 CREATE_LIMIT_ANONYMOUS = 20
 ALIAS_CHECK_LIMIT = 120
+BULK_LIMIT = 30
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -187,6 +189,48 @@ async def top_links(
     if days not in leaderboard.ALLOWED_DAYS:
         raise APIError(422, "validation_error", "days must be 1, 7 or 30.")
     return await leaderboard.top_links(session, context.workspace.id, days, limit)
+
+
+class BulkLinksRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    codes: list[Annotated[str, StringConstraints(min_length=1, max_length=64)]] = Field(
+        min_length=1, max_length=links_service.MAX_BULK_CODES
+    )
+    action: Literal["pause", "resume", "delete", "add_tags", "remove_tags"]
+    tags: list[str] | None = None
+
+
+@router.post(
+    "/bulk",
+    summary="Pause, resume, delete or tag many links at once",
+    dependencies=[Depends(validate_body_size), Depends(enforce_same_origin)],
+)
+async def bulk_links(
+    payload: BulkLinksRequest,
+    session: AsyncSession = Depends(get_api_session),
+    context: WorkspaceContext = Depends(get_workspace_context),
+) -> dict:
+    require_role(context.role, "member")
+    allowed, retry_after = await ratelimit.check_rate_limit(
+        f"bulk:{context.workspace.id}", BULK_LIMIT
+    )
+    if not allowed:
+        raise APIError(
+            429, "rate_limited", "Too many requests.", headers={"Retry-After": str(retry_after)}
+        )
+    results = await links_service.bulk_update(
+        session, context.workspace.id, payload.codes, payload.action, payload.tags
+    )
+    changed = [item["short_code"] for item in results if item["status"] == "ok"]
+    if payload.action in ("pause", "resume", "delete"):
+        await invalidate_caches(changed)
+    return {
+        "action": payload.action,
+        "results": results,
+        "updated": len(changed),
+        "workspace_id": str(context.workspace.id),
+    }
 
 
 @router.get("/{code}", summary="Link metadata (workspace, token, or public)")

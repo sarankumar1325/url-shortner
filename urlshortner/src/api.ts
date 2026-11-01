@@ -613,6 +613,29 @@ export function deleteLink(
   })
 }
 
+export type BulkAction = 'pause' | 'resume' | 'delete' | 'add_tags' | 'remove_tags'
+export type BulkStatus = 'ok' | 'not_found' | 'too_many_tags'
+export type BulkResponse = {
+  action: BulkAction
+  results: { short_code: string; status: BulkStatus }[]
+  updated: number
+  workspace_id: string
+}
+
+/** One action for up to 200 links of the workspace, in one transaction. */
+export function bulkLinks(
+  workspaceId: string,
+  body: { codes: string[]; action: BulkAction; tags?: string[] },
+  signal: AbortSignal,
+): Promise<BulkResponse> {
+  return request<BulkResponse>('/api/v1/links/bulk', {
+    method: 'POST',
+    body,
+    access: { workspaceId },
+    signal,
+  })
+}
+
 function utcDay(offsetDays = 0): string {
   const day = new Date()
   day.setUTCHours(0, 0, 0, 0)

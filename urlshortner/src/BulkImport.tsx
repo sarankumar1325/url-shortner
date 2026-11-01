@@ -5,6 +5,7 @@ import {
   isProblem,
   type CreatedLink,
 } from './api'
+import { runPool, withRateLimitRetry } from './bulk'
 import Modal from './Modal'
 import {
   downloadTextFile,
@@ -14,11 +15,14 @@ import {
 } from './links'
 
 const TEMPLATE = [
-  'long_url,custom_alias,expires_at,tags',
-  'https://example.com/launch,,,launch',
-  'https://example.com/docs,product-docs,2027-01-31,"docs,product"',
+  'long_url,custom_alias,expires_at,tags,fallback_url,max_clicks',
+  'https://example.com/launch,,,launch,,',
+  'https://example.com/docs,product-docs,2027-01-31,"docs,product",https://example.com/,500',
   '',
 ].join('\r\n')
+
+/** Rows created at the same time; more would trip the create rate limit sooner. */
+const CONCURRENCY = 3
 
 function rowMessage(error: unknown): string {
   if (isProblem(error)) return error.problem.detail
@@ -57,26 +61,32 @@ export default function BulkImport({
     setResults([])
     const created: CreatedLink[] = []
     const outcome: { line: number; ok: boolean; message: string }[] = []
-    for (const row of valid) {
+    await runPool(valid, CONCURRENCY, async (row) => {
+      // One key per row, so a retried request can never create a second link.
+      const idempotencyKey = crypto.randomUUID()
       try {
-        const link = await createLink(
-          {
-            long_url: row.destination,
-            custom_alias: row.alias || null,
-            expires_at: row.expiresAt ? expiryInstant(row.expiresAt) : null,
-            tags: row.tags,
-          },
-          crypto.randomUUID(),
-          workspaceId,
-          new AbortController().signal,
+        const link = await withRateLimitRetry(() =>
+          createLink(
+            {
+              long_url: row.destination,
+              custom_alias: row.alias || null,
+              expires_at: row.expiresAt ? expiryInstant(row.expiresAt) : null,
+              tags: row.tags,
+              fallback_url: row.fallbackUrl,
+              max_clicks: row.maxClicks,
+            },
+            idempotencyKey,
+            workspaceId,
+            new AbortController().signal,
+          ),
         )
         created.push(link)
         outcome.push({ line: row.line, ok: true, message: link.short_code })
       } catch (error) {
         outcome.push({ line: row.line, ok: false, message: rowMessage(error) })
       }
-      setResults([...outcome])
-    }
+      setResults([...outcome].sort((a, b) => a.line - b.line))
+    })
     setRunning(false)
     setFinished(true)
     if (created.length > 0) onImported(created)
@@ -96,7 +106,8 @@ export default function BulkImport({
       <p>
         Add up to 50 links at a time. Every row is validated on its own, so one
         bad row never blocks the rest. Columns: <code>long_url</code>,{' '}
-        <code>custom_alias</code>, <code>expires_at</code>, <code>tags</code>.
+        <code>custom_alias</code>, <code>expires_at</code>, <code>tags</code>,{' '}
+        <code>fallback_url</code>, <code>max_clicks</code>.
       </p>
       {finished ? (
         <div className="import-summary" role="status">

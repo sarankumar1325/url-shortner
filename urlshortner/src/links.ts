@@ -540,6 +540,8 @@ export type ImportRow = {
   expiresAt: string
   tags: string[]
   tagError: string | null
+  fallbackUrl: string | null
+  maxClicks: number | null
   errors: string[]
   valid: boolean
 }
@@ -548,6 +550,8 @@ const URL_HEADERS = ['long_url', 'url', 'destination', 'link']
 const ALIAS_HEADERS = ['custom_alias', 'alias', 'code']
 const EXPIRY_HEADERS = ['expires_at', 'expiry', 'expires']
 const TAGS_HEADERS = ['tags', 'tag', 'labels']
+const FALLBACK_HEADERS = ['fallback_url', 'fallback']
+const LIMIT_HEADERS = ['max_clicks', 'visit_limit', 'max_visits']
 
 function headerIndex(
   header: string[],
@@ -572,6 +576,8 @@ export function parseLinkCsv(
   let aliasIndex = 1
   let expiryIndex = 2
   let tagsIndex = 3
+  let fallbackIndex = 4
+  let limitIndex = 5
   let data = table
 
   if (hasHeader) {
@@ -584,6 +590,8 @@ export function parseLinkCsv(
     aliasIndex = headerIndex(first, ALIAS_HEADERS, -1)
     expiryIndex = headerIndex(first, EXPIRY_HEADERS, -1)
     tagsIndex = headerIndex(first, TAGS_HEADERS, -1)
+    fallbackIndex = headerIndex(first, FALLBACK_HEADERS, -1)
+    limitIndex = headerIndex(first, LIMIT_HEADERS, -1)
     data = table.slice(1)
   }
 
@@ -607,11 +615,14 @@ export function parseLinkCsv(
       now,
     )
     const parsedTags = parseTags(tagInput)
+    const limits = validateLimits(cell(fallbackIndex), cell(limitIndex))
     const errors = [
       fields.destination,
       fields.alias,
       fields.expiresAt,
       parsedTags.error,
+      limits.errors.fallbackUrl && `Fallback: ${limits.errors.fallbackUrl}`,
+      limits.errors.maxClicks,
     ].filter((value): value is string => Boolean(value))
     if (alias && !fields.alias) codes.add(alias)
     return {
@@ -621,6 +632,8 @@ export function parseLinkCsv(
       expiresAt,
       tags: parsedTags.tags,
       tagError: parsedTags.error,
+      fallbackUrl: limits.fallbackUrl,
+      maxClicks: limits.maxClicks,
       errors,
       valid: errors.length === 0,
     }

@@ -10,18 +10,13 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-import pytest_asyncio
 from argon2 import PasswordHasher
-from sqlalchemy import CheckConstraint, MetaData, event, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
+from sqlalchemy import select
 
 from backend.core import timing
-from backend.core.db import instrument
 from backend.core.problems import APIError
 from backend.core.security import hash_opaque_token, password_needs_rehash, verify_password
 from backend.models import (
-    Base,
     RetiredShortCode,
     Url,
     User,
@@ -36,28 +31,6 @@ from backend.services import links as links_service
 from backend.services import workspaces as workspace_service
 
 PASSWORD = "correct-horse-battery"
-
-
-@pytest_asyncio.fixture
-async def factory():
-    metadata = MetaData()
-    for table in Base.metadata.sorted_tables:
-        copy = table.to_metadata(metadata)
-        for constraint in [c for c in copy.constraints if isinstance(c, CheckConstraint)]:
-            copy.constraints.discard(constraint)
-    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
-
-    @event.listens_for(engine.sync_engine, "connect")
-    def _foreign_keys(dbapi_connection, _record) -> None:
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
-
-    instrument(engine.sync_engine)
-    async with engine.begin() as connection:
-        await connection.run_sync(metadata.create_all)
-    yield async_sessionmaker(engine, expire_on_commit=False)
-    await engine.dispose()
 
 
 async def _signup(session, email: str, *, persistent: bool = True) -> tuple[User, str]:

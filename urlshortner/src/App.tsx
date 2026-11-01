@@ -52,6 +52,7 @@ import {
 } from 'react-router-dom'
 import {
   analyticsRange,
+  bulkLinks,
   createLink,
   deleteLink as deleteLinkRequest,
   getAnalytics,
@@ -61,6 +62,7 @@ import {
   updateLink as updateLinkRequest,
   type Access,
   type ApiProblem,
+  type BulkResponse,
   type CreateBody,
   type CreatedLink,
 } from './api'
@@ -69,7 +71,8 @@ import AuthPage, { BrandMark } from './AuthPage'
 import InvitePage from './InvitePage'
 import ReportPage from './ReportPage'
 import { AnalyticsTeaser } from './ClickChart'
-import LinkList from './LinkList'
+import LinkList, { type BulkControls } from './LinkList'
+import { applyBulkResult, bulkSummary, chunk, withRateLimitRetry } from './bulk'
 import Modal from './Modal'
 import BulkImport from './BulkImport'
 import {
@@ -1763,6 +1766,43 @@ function WorkspaceShell() {
     setNotice('CSV export downloaded.')
   }
 
+  const bulkControls: BulkControls = {
+    canEdit,
+    async run(action, codes, tags = []) {
+      const results: BulkResponse['results'] = []
+      try {
+        for (const part of chunk(codes)) {
+          const response = await withRateLimitRetry(() =>
+            bulkLinks(
+              workspaceId,
+              { codes: part, action, ...(tags.length > 0 ? { tags } : {}) },
+              new AbortController().signal,
+            ),
+          )
+          results.push(...response.results)
+          setLinks((current) => applyBulkResult(current, response, tags))
+        }
+        setNotice(bulkSummary({ action, results }))
+        return true
+      } catch (failure) {
+        setNotice(
+          results.length > 0
+            ? `${bulkSummary({ action, results })} The rest failed: ${describeError(failure)}`
+            : describeError(failure),
+        )
+        return false
+      }
+    },
+    exportSelected(codes) {
+      const chosen = new Set(codes)
+      downloadTextFile(
+        csvFileName(),
+        '\uFEFF' + linksCsv(links.filter((link) => chosen.has(link.code))),
+      )
+      setNotice(`Exported ${codes.length} link${codes.length === 1 ? '' : 's'}.`)
+    },
+  }
+
   const copy = useCallback(async (value: string, message = 'Copied to clipboard.') => {
     if (!value) return
     const outcome = await copyText(value)
@@ -2194,6 +2234,7 @@ function WorkspaceShell() {
                       onCopy={copyLink}
                       onExport={exportLinks}
                       onImport={canEdit ? () => setImportOpen(true) : undefined}
+                      bulk={bulkControls}
                     />
                   )}
                   <div className="workspace-bottom-note">

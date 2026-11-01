@@ -25,6 +25,7 @@ from backend.models import ClickDaily, CreateRequest, RetiredShortCode, Url, Url
 from backend.services.analytics import classify_device
 from backend.services.retired_codes import is_retired
 from backend.services.validation import (
+    MAX_TAGS,
     RESERVED_SEGMENTS,
     normalize_tags,
     validate_custom_alias,
@@ -496,6 +497,94 @@ async def delete_link(session: AsyncSession, url: Url) -> None:
     url.deleted_at = _now()
     url.updated_at = _now()
     await session.commit()
+
+
+BULK_ACTIONS = ("pause", "resume", "delete", "add_tags", "remove_tags")
+MAX_BULK_CODES = 200
+
+
+async def bulk_update(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    codes: list[str],
+    action: str,
+    tags: list[str] | None = None,
+) -> list[dict]:
+    """Apply one action to many links of a workspace in a single transaction.
+
+    Each code gets its own status: "ok", "not_found" (missing, deleted, blocked
+    or in another workspace) or, when adding tags, "too_many_tags".
+    """
+    unique = list(dict.fromkeys(codes))
+    tag_action = action in ("add_tags", "remove_tags")
+    normalized: list[str] = []
+    if tag_action:
+        normalized = normalize_tags(tags)
+        if not normalized:
+            message = "Choose at least one tag."
+            raise APIError(
+                422,
+                "validation_error",
+                message,
+                errors=[{"field": "tags", "code": "missing", "message": message}],
+            )
+    elif tags is not None:
+        message = "Tags are only used when adding or removing tags."
+        raise APIError(
+            422,
+            "validation_error",
+            message,
+            errors=[{"field": "tags", "code": "unexpected", "message": message}],
+        )
+
+    result = await session.execute(
+        select(Url.id, Url.short_code).where(
+            Url.workspace_id == workspace_id,
+            Url.short_code.in_(unique),
+            Url.deleted_at.is_(None),
+            Url.is_blocked.is_(False),
+        )
+    )
+    found = {code: url_id for url_id, code in result.all()}
+    status = {code: ("ok" if code in found else "not_found") for code in unique}
+    ids = list(found.values())
+    now = _now()
+
+    if ids and action in ("pause", "resume"):
+        await session.execute(
+            update(Url).where(Url.id.in_(ids)).values(is_active=action == "resume", updated_at=now)
+        )
+    elif ids and action == "delete":
+        await session.execute(
+            update(Url).where(Url.id.in_(ids)).values(deleted_at=now, updated_at=now)
+        )
+    elif ids and action == "remove_tags":
+        await session.execute(
+            delete(UrlTag).where(UrlTag.url_id.in_(ids), UrlTag.tag.in_(normalized))
+        )
+        await session.execute(update(Url).where(Url.id.in_(ids)).values(updated_at=now))
+    elif ids and action == "add_tags":
+        current = await tags_for(session, ids)
+        additions: list[dict] = []
+        changed: list[int] = []
+        for code, url_id in found.items():
+            existing = current.get(url_id, [])
+            missing = [tag for tag in normalized if tag not in existing]
+            if len(existing) + len(missing) > MAX_TAGS:
+                status[code] = "too_many_tags"
+                continue
+            additions += [{"url_id": url_id, "tag": tag} for tag in missing]
+            if missing:
+                changed.append(url_id)
+        if additions:
+            await session.execute(
+                pg_insert(UrlTag)
+                .values(additions)
+                .on_conflict_do_nothing(index_elements=["url_id", "tag"])
+            )
+            await session.execute(update(Url).where(Url.id.in_(changed)).values(updated_at=now))
+    await session.commit()
+    return [{"short_code": code, "status": status[code]} for code in unique]
 
 
 async def alias_availability(session: AsyncSession, alias: str) -> dict:

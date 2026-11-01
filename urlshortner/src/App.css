@@ -3844,3 +3844,92 @@ button:disabled {
 .campaign-chip > span {
   opacity: 0.75;
 }
+
+/* Bulk selection */
+.row-check {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  flex: none;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.select-header {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+}
+.link-row.selected {
+  background: var(--accent-soft);
+}
+.bulk-bar {
+  position: sticky;
+  bottom: 16px;
+  z-index: 15;
+  margin-top: 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--raised);
+  box-shadow: 0 10px 30px #0000001f;
+}
+.bulk-bar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.bulk-count {
+  font-size: 13px;
+  font-weight: 600;
+  margin-right: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.bulk-bar .secondary-button,
+.bulk-bar .danger-button {
+  min-height: 36px;
+  font-size: 13px;
+}
+.bulk-clear {
+  margin-left: auto;
+}
+.bulk-tag-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--rule);
+}
+.bulk-tag-form label {
+  font-size: 12px;
+  color: var(--muted);
+}
+.bulk-tag-form input {
+  flex: 1 1 180px;
+  min-width: 0;
+  height: 38px;
+  border: 1px solid var(--control);
+  border-radius: 6px;
+  background: var(--raised);
+  color: var(--text);
+  padding: 0 10px;
+  font-size: 13px;
+}
+.bulk-tag-form > p {
+  flex-basis: 100%;
+  margin: 0;
+}
+@media (max-width: 540px) {
+  .link-identity > .row-check {
+    display: block;
+  }
+  .bulk-bar {
+    bottom: 8px;
+  }
+  .bulk-bar .secondary-button,
+  .bulk-bar .danger-button {
+    min-height: 44px;
+  }
+}

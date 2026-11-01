@@ -1,15 +1,22 @@
-import { useState } from 'react'
+import { useState, type FormEvent, type ReactNode } from 'react'
 import {
   ArrowRight,
   ArrowUpRight,
   Copy,
   Download,
   Link2,
+  LoaderCircle,
+  Pause,
+  Play,
   Search,
+  Tag,
+  Trash2,
   Upload,
   X,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
+import type { BulkAction } from './api'
+import { selectionState, toggleAllVisible, toggleCode, visibleSelection } from './bulk'
 import { fullUrl } from './clipboard'
 import {
   displayShortUrl,
@@ -17,14 +24,25 @@ import {
   isExpiringSoon,
   linkClicks,
   number,
+  parseTags,
   sortLinks,
   statusClass,
   titleFor,
   type LinkRecord,
   type LinkSort,
 } from './links'
+import Modal from './Modal'
 
 const FILTERS = ['All links', 'Active', 'Paused', 'Expired', 'Used up'] as const
+
+export type BulkControls = {
+  canEdit: boolean
+  /** Resolves true once the action is applied, false if it failed. */
+  run: (action: BulkAction, codes: string[], tags?: string[]) => Promise<boolean>
+  exportSelected: (codes: string[]) => void
+}
+
+type TagMode = 'add_tags' | 'remove_tags'
 
 export default function LinkList({
   links,
@@ -32,17 +50,39 @@ export default function LinkList({
   overview = false,
   onExport,
   onImport,
+  bulk,
 }: {
   links: LinkRecord[]
   onCopy: (value: string) => void
   overview?: boolean
   onExport?: () => void
   onImport?: () => void
+  bulk?: BulkControls
 }) {
-  const [search, setSearch] = useState('')
-  const [filter, setFilter] = useState<(typeof FILTERS)[number]>('All links')
-  const [tag, setTag] = useState<string | null>(null)
+  const [search, setSearchValue] = useState('')
+  const [filter, setFilterValue] = useState<(typeof FILTERS)[number]>('All links')
+  const [tag, setTagValue] = useState<string | null>(null)
   const [sort, setSort] = useState<LinkSort>('newest')
+  const [selected, setSelected] = useState<Set<string>>(() => new Set())
+  const [busy, setBusy] = useState<BulkAction | null>(null)
+  const [tagMode, setTagMode] = useState<TagMode | null>(null)
+  const [tagInput, setTagInput] = useState('')
+  const [tagError, setTagError] = useState<string | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  // Changing what is shown clears the selection, so an action never reaches
+  // links the person can no longer see.
+  const setSearch = (value: string) => {
+    setSearchValue(value)
+    setSelected(new Set())
+  }
+  const setFilter = (value: (typeof FILTERS)[number]) => {
+    setFilterValue(value)
+    setSelected(new Set())
+  }
+  const setTag = (value: string | null) => {
+    setTagValue(value)
+    setSelected(new Set())
+  }
   const tags = Array.from(new Set(links.flatMap((link) => link.tags))).sort()
   const filtered = links.filter((link) => {
     const matchesSearch = `${titleFor(link.destination)} ${link.code} ${link.destination} ${link.tags.join(' ')}`
@@ -57,6 +97,44 @@ export default function LinkList({
   })
   const sorted = sortLinks(filtered, sort)
   const visible = overview ? sorted.slice(0, 4) : sorted
+  const selectable = Boolean(bulk) && !overview
+  const visibleCodes = visible.map((link) => link.code)
+  const chosen = selectable ? visibleSelection(selected, visibleCodes) : []
+  const allState = selectionState(selected, visibleCodes)
+  const chosenTags = Array.from(
+    new Set(visible.filter((link) => chosen.includes(link.code)).flatMap((link) => link.tags)),
+  ).sort()
+
+  async function act(action: BulkAction, tags?: string[]) {
+    if (!bulk || busy || chosen.length === 0) return
+    setBusy(action)
+    const done = await bulk.run(action, chosen, tags)
+    setBusy(null)
+    if (done) {
+      setSelected(new Set())
+      setTagMode(null)
+      setTagInput('')
+      setConfirmDelete(false)
+    }
+  }
+
+  function submitTags(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!tagMode) return
+    const parsed = parseTags(tagInput)
+    const error = parsed.error ?? (parsed.tags.length === 0 ? 'Enter at least one tag.' : null)
+    setTagError(error)
+    if (!error) void act(tagMode, parsed.tags)
+  }
+
+  function openTags(mode: TagMode) {
+    setTagMode(tagMode === mode ? null : mode)
+    setTagInput('')
+    setTagError(null)
+  }
+
+  const spinner = (action: BulkAction, icon: ReactNode) =>
+    busy === action ? <LoaderCircle size={14} className="spin" /> : icon
 
   return (
     <section className="links-section" aria-labelledby="links-heading">
@@ -153,7 +231,22 @@ export default function LinkList({
       )}
       <div className="link-table" role="table" aria-label="Your links">
         <div className="link-table-head link-grid" role="row">
-          <span role="columnheader">Link</span>
+          <span role="columnheader" className={selectable ? 'select-header' : undefined}>
+            {selectable && (
+              <input
+                type="checkbox"
+                className="row-check"
+                aria-label="Select all visible links"
+                checked={allState === 'all'}
+                disabled={visible.length === 0}
+                ref={(element) => {
+                  if (element) element.indeterminate = allState === 'some'
+                }}
+                onChange={() => setSelected(toggleAllVisible(selected, visibleCodes))}
+              />
+            )}
+            Link
+          </span>
           <span role="columnheader">Status</span>
           <span role="columnheader" className="numeric">
             Clicks · 30d
@@ -171,13 +264,23 @@ export default function LinkList({
           const subtitle = titleFor(link.destination)
           return (
             <div
-              className="link-row link-grid"
+              className={`link-row link-grid${selectable && selected.has(link.code) ? ' selected' : ''}`}
               role="row"
               key={link.code}
               data-copy-url={link.shortUrl ? fullUrl(link.shortUrl) : undefined}
             >
               <div className="link-identity" role="cell">
-                <Link2 size={18} aria-hidden="true" strokeWidth={1.5} />
+                {selectable ? (
+                  <input
+                    type="checkbox"
+                    className="row-check"
+                    aria-label={`Select ${link.code}`}
+                    checked={selected.has(link.code)}
+                    onChange={() => setSelected(toggleCode(selected, link.code))}
+                  />
+                ) : (
+                  <Link2 size={18} aria-hidden="true" strokeWidth={1.5} />
+                )}
                 <div>
                   <Link to={`/links/${link.code}`} className="short-link">
                     {link.shortUrl
@@ -309,6 +412,123 @@ export default function LinkList({
         </span>
         <span>Click counts cover the last 30 UTC days.</span>
       </div>
+      {bulk && chosen.length > 0 && (
+        <div className="bulk-bar" role="region" aria-label="Actions for selected links">
+          <div className="bulk-bar-row">
+            <strong className="bulk-count" aria-live="polite">
+              {chosen.length} selected
+            </strong>
+            {bulk.canEdit && (
+              <>
+                <button type="button" className="secondary-button" disabled={busy !== null} onClick={() => void act('pause')}>
+                  {spinner('pause', <Pause size={14} />)} Pause
+                </button>
+                <button type="button" className="secondary-button" disabled={busy !== null} onClick={() => void act('resume')}>
+                  {spinner('resume', <Play size={14} />)} Resume
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  aria-expanded={tagMode === 'add_tags'}
+                  disabled={busy !== null}
+                  onClick={() => openTags('add_tags')}
+                >
+                  {spinner('add_tags', <Tag size={14} />)} Add tag
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  aria-expanded={tagMode === 'remove_tags'}
+                  disabled={busy !== null || chosenTags.length === 0}
+                  onClick={() => openTags('remove_tags')}
+                >
+                  {spinner('remove_tags', <X size={14} />)} Remove tag
+                </button>
+              </>
+            )}
+            <button type="button" className="secondary-button" onClick={() => bulk.exportSelected(chosen)}>
+              <Download size={14} /> Export selected
+            </button>
+            {bulk.canEdit && (
+              <button type="button" className="danger-button" disabled={busy !== null} onClick={() => setConfirmDelete(true)}>
+                <Trash2 size={14} /> Delete
+              </button>
+            )}
+            <button
+              type="button"
+              className="icon-button bulk-clear"
+              aria-label="Clear selection"
+              onClick={() => {
+                setSelected(new Set())
+                setTagMode(null)
+              }}
+            >
+              <X size={16} />
+            </button>
+          </div>
+          {tagMode && (
+            <form className="bulk-tag-form" onSubmit={submitTags} noValidate>
+              <label htmlFor="bulk-tags">
+                {tagMode === 'add_tags' ? 'Tags to add' : 'Tags to remove'}
+              </label>
+              <input
+                id="bulk-tags"
+                value={tagInput}
+                onChange={(event) => setTagInput(event.target.value)}
+                list={tagMode === 'remove_tags' ? 'bulk-tag-options' : 'bulk-all-tags'}
+                placeholder="launch, spring"
+                aria-describedby="bulk-tags-hint"
+                aria-invalid={tagError ? true : undefined}
+                autoFocus
+              />
+              <datalist id="bulk-tag-options">
+                {chosenTags.map((name) => (
+                  <option value={name} key={name} />
+                ))}
+              </datalist>
+              <datalist id="bulk-all-tags">
+                {tags.map((name) => (
+                  <option value={name} key={name} />
+                ))}
+              </datalist>
+              <button type="submit" className="primary-button" disabled={busy !== null}>
+                {tagMode === 'add_tags' ? 'Add' : 'Remove'}
+              </button>
+              <p id="bulk-tags-hint" className={tagError ? 'field-error' : 'field-hint'} role={tagError ? 'alert' : undefined}>
+                {tagError ??
+                  (tagMode === 'add_tags'
+                    ? 'Separate tags with commas. Links keep at most 5 tags.'
+                    : `On the selected links: ${chosenTags.join(', ')}`)}
+              </p>
+            </form>
+          )}
+        </div>
+      )}
+      {confirmDelete && (
+        <Modal
+          title={`Delete ${chosen.length} link${chosen.length === 1 ? '' : 's'}?`}
+          onClose={() => setConfirmDelete(false)}
+        >
+          <p>
+            Redirects stop right away and the short codes are never reused.
+            This cannot be undone.
+          </p>
+          <div className="dialog-actions">
+            <button type="button" className="secondary-button" onClick={() => setConfirmDelete(false)}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="danger-button filled"
+              disabled={busy !== null}
+              onClick={() => void act('delete')}
+            >
+              {spinner('delete', <Trash2 size={14} />)}
+              Delete {chosen.length} link{chosen.length === 1 ? '' : 's'}
+            </button>
+          </div>
+        </Modal>
+      )}
     </section>
   )
 }
