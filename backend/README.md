@@ -31,6 +31,15 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
+## Delete test accounts
+
+```bash
+uv run python -m backend.scripts.delete_accounts --email-like 'qa-droid-%@example.com'        # dry run
+uv run python -m backend.scripts.delete_accounts --email-like 'qa-droid-%@example.com' --yes  # delete
+```
+
+See [`../docs/backend/deployment.md`](../docs/backend/deployment.md#test-account-cleanup).
+
 ## Design
 
 The API contract, data model, caching, analytics, security, and Vercel deployment are documented in [`../docs/backend/`](../docs/backend/). The current code is the initial foundation: app factory, settings, CORS, `/health`, tests, and the Vercel entrypoint.

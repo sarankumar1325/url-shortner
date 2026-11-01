@@ -1,6 +1,6 @@
 # Observability, SLOs and Recovery
 
-Status: safe JSON access logging is implemented; SLOs, metrics, tracing and alerts remain proposed targets, not measured results · [Capacity](caching-and-scale.md) · [Deployment](deployment.md)
+Status: safe JSON access logging and per-response `Server-Timing` are implemented; SLOs, metrics, tracing and alerts remain proposed targets, not measured results · [Capacity](caching-and-scale.md) · [Deployment](deployment.md)
 
 ## Measurement definitions
 
@@ -30,6 +30,16 @@ Generate/validate bounded UUID request IDs and echo `X-Request-ID`. Log JSON wit
 Never log destinations, bodies, `Authorization`, `X-Management-Token`, `Idempotency-Key`, cookies, IPs, UA/referrer strings, encryption material or validation input. SQL exception parameters can contain URLs/tokens; configure scrubbing rather than blindly dumping exceptions. Audit platform access logs and tracing integrations too.
 
 Use route/status/error enums as metric labels. Never label metrics with short codes, IP hashes, token values, request IDs or URLs. Sampled controlled diagnostic logs may use a short code only when operationally necessary and covered by access/retention policy.
+
+## Server-Timing
+
+Implemented now: `ServerTimingMiddleware` (`core/timing.py`) adds one header to every response:
+
+```text
+Server-Timing: db;dur=12.4;desc="Postgres x2", redis;dur=3.1;desc="Redis x1", total;dur=18.9
+```
+
+A per-request accumulator lives in a context variable. Postgres time comes from SQLAlchemy `before_cursor_execute`/`after_cursor_execute` listeners (`core/db.py` `instrument`), Redis time from the REST command and pipeline helpers (`core/redis.py`). The header is written when the response starts, so it covers all work done by then; background work after the response is not included. CORS exposes the header, and the browser's Network panel shows it for requests through the `/api` rewrite. It carries only durations and counts, never queries, keys or codes. It is a per-request diagnostic, not a metric or trace pipeline.
 
 ## Metrics and dashboards
 
@@ -81,6 +91,7 @@ For availability, prefer multi-window error-budget burn alerts over single 4xx s
 ## Health versus readiness
 
 - `/health`: process/app liveness, no dependency calls, safe for frequent probes.
+- `/api/v1/health` and `/api/v1/ready` are the same handlers under the API prefix. The web app's login and signup pages call `/api/v1/ready` once on mount to warm the function and the database through the same-origin rewrite.
 - `/ready`: bounded DB check and Redis check in parallel, detailed internal telemetry but only generic public ready/not-ready response. Redis failure may still allow some redirects but blocks readiness for full functionality.
 - Vercel does not automatically route traffic using these endpoints. External health monitoring and deployment smoke tests must be configured explicitly.
 

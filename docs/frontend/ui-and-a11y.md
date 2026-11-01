@@ -12,6 +12,11 @@ V1 includes email/password accounts, personal and shared workspaces, invitations
 
 - `/login` and `/signup` share one focused form layout: labeled email, password (with an accessible show/hide control), optional display name on sign-up, a submit button with pending state, and a link to the other mode. Preserve the `next` return path, but never allow an absolute or protocol-relative redirect.
 - Password guidance appears before submission (“At least 10 characters”). Do not enforce composition rules the server does not enforce.
+- Fields carry `name` and `autocomplete` attributes for password managers: the sign-in email uses `username`, passwords use `current-password` or `new-password`. Emails are trimmed before submission. The change-password form in Settings includes a hidden `username` field so managers update the right entry.
+- A **Stay signed in** checkbox, on by default, sends `remember`. Unchecked, the session ends when the browser closes and after 24 hours at most.
+- The password field warns when Caps Lock is on, and when a pasted password starts or ends with a space or ends with a line break, because passwords are compared exactly.
+- After 2 seconds the pending button reads “Still signing in…”. A `429` shows a countdown and keeps the button disabled until it ends. Offline, unreachable server, timeout and 5xx failures each get their own message, and none blames the user's details.
+- The typed email carries over when switching between sign-in and sign-up. There is no forgot-password link because there is no reset flow.
 - Invalid credentials produce one form-level message that does not reveal whether the email exists. `409 email_taken` maps to the email field and points to sign-in.
 - After sign-up/sign-in, focus the workspace page heading and announce that the personal workspace is ready. Sign-out asks for confirmation only if unsaved drafts exist, then clears all private views.
 - When the session is loading, show a non-flashing checking state; an anonymous user is redirected to `/login?next=…`.
@@ -33,10 +38,29 @@ Validate on interaction/submission, preserve drafts on failure, and disable dupl
 
 After confirmed creation:
 
-1. Focus the result heading; show the short URL with distinct **Copy link** and **Open link** actions. Keep the full destination available through an accessible disclosure rather than a hover-only tooltip.
+1. Move focus to **Copy link**, so Enter copies immediately; also show **Open link**. The short URL appears in a read-only field that selects all on click or focus. Keep the full destination available through an accessible disclosure rather than a hover-only tooltip.
 2. For a workspace link, state that it is live in the named workspace and that members can manage it. There is **no management token** to back up.
 3. For a legacy unauthenticated create (outside the normal product UI), present the one-time management-token backup before dismissal: reveal, **Copy management token**, “If you lose it, the server cannot recover it,” and an unchecked **Remember on this device** option that warns same-origin scripts can read it.
-4. Clear the revealed value and transient create result on exit. Clipboard denial leaves a selectable value and manual instructions. Announce “Link copied” or “Management token copied” without announcing the secret.
+4. Clear the revealed value and transient create result on exit. Announce “Link copied” or “Management token copied” without announcing the secret.
+
+### Copying
+
+`copyText` (`src/clipboard.ts`) tries the Clipboard API, then `document.execCommand('copy')`, and if both are blocked (embedded browsers, plain-HTTP pages) the shell opens a manual-copy dialog with the value preselected. Short links are always copied as full `https://` URLs (`fullUrl`). Copy buttons share this path through `useCopy()` in the create result, link list rows, Top links on the overview, the dashboard link-health table, link details (short link, `+` preview link and destination), the QR studio and invite links.
+
+### Keyboard shortcuts and paste
+
+Single-key shortcuts are ignored while typing in a field, with modifier keys held, or while a dialog is open. The help dialog (`?`) lists them:
+
+| Key | Action |
+| --- | --- |
+| `N` | New link |
+| `/` | Search links |
+| `C` | Copy the focused row, else the hovered row, else the open link (detail page or new result) |
+| `[` | Collapse or expand the sidebar |
+| `?` | Shortcut help |
+| ⌘V / Ctrl+V | Outside a text field, a pasted URL opens the create form prefilled |
+
+`C` reads `data-copy-url` from the focused or hovered element; the page-level fallback is marked `data-copy-default`. A global paste that is a URL, or a bare domain (which gets `https://`), fills the destination and focuses **Shorten link**, so Enter creates it. Anything else is ignored, and pastes into fields behave normally.
 
 Creation replay can return the same response for 24 hours; it is transport recovery, not an ongoing reveal screen. Workspace replay never contains a token.
 
@@ -83,7 +107,7 @@ Privacy copy must match V1: aggregate clicks and limited recent breakdowns; **no
 Mirror the [API validation rules](../backend/api.md) for UX, with server errors authoritative:
 
 - Email: use `type="email"`, `autoComplete` appropriate to sign-in/sign-up, and surface `email_taken` on the field.
-- Password: at least 10 and at most 128 characters; show an accessible reveal control and allow paste.
+- Password: at least 10 and at most 128 characters; show an accessible reveal control and allow paste, with a warning for leading/trailing whitespace in the pasted value.
 - Destination: absolute HTTP(S), no credentials/control characters, up to 8192 characters. Use `type="url"`, `inputMode="url"`, no auto-capitalization; do not claim client checks prove a target safe.
 - Alias: 3–32 lowercase letters/digits/`_`/`-`, alphanumeric ends; show a short-URL preview and reserved-name guidance.
 - Expiry: optional future time, at most five years ahead. A `datetime-local` input must identify the user's timezone and convert to a UTC timestamp; handle invalid/ambiguous local times instead of appending `Z` to local input.
@@ -108,5 +132,7 @@ Use inline alerts for errors requiring action; toasts alone are insufficient. In
 - The workspace role select and destructive buttons must have names that include the target person, not just “Remove” repeated down a list.
 
 The SPA not-found view provides a clear route home but ordinarily arrives in an HTTP-200 HTML response; only hosting changes can provide a true document 404. See [deployment](deployment.md).
+
+Settings ends with a **Delete account** danger section. It needs the current password and the account email typed again; the button stays disabled until a password is entered and the email matches. If the account owns shared workspaces with other members, the `409` is shown as a list of those workspaces (each switches to that workspace) with instructions to transfer or delete them first. On success the app returns to sign-in with a one-time “Your account was deleted.” notice.
 
 Before release, test sign-up/sign-in/validation, invite acceptance and role boundaries, workspace switching, link create/backup (legacy), clipboard failure, token replacement and cross-tab forget, delete confirmation, all error/loading states, UTC controls and chart tables with keyboard and a screen reader. Automated axe/component tests are planned checks, not evidence of conformance today.

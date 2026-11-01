@@ -24,7 +24,19 @@ bun dev        # development server
 bun run build  # type-check and production build
 bun preview    # serve the production build locally
 bun run lint   # oxlint
+bun test       # unit tests
+bun run e2e    # Playwright journey (see below)
 ```
+
+## End-to-end tests
+
+```bash
+bunx playwright install chromium   # once
+bun run e2e                        # starts Vite on :5173; the API must run at 127.0.0.1:8000
+E2E_BASE_URL=https://shortlyyy-web.vercel.app bun run e2e
+```
+
+The journey creates a `qa-droid-<timestamp>@example.com` account and deletes it at the end, even on failure. Tests live in `e2e/*.e2e.ts` so `bun test` skips them. Details are in [../docs/frontend/deployment.md](../docs/frontend/deployment.md#end-to-end-tests).
 
 ## Environment
 

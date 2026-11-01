@@ -26,6 +26,8 @@ Establish a repeatable lab baseline on a documented mobile device/throttling pro
 - Reserve space for result cards, totals and charts; match loading layouts to avoid shifts.
 - Profile before adding memoization. Daily analytics has at most 366 buckets; V1 does not need a generalized virtualization layer.
 - Bound visible workspace-link rows and their metadata requests; do not fetch every link's analytics on startup. The workspace list already carries `clicks_30d`, so the home list needs no per-link analytics request.
+- The sign-in and sign-up pages call `warmUp()` (`GET /api/v1/ready`) once on mount, so the API's cold start and the database wake-up overlap with typing rather than with the submit.
+- On reload, the shell renders from the cached account summary (`shortly.session.v1`) and starts the workspace link request in parallel with `/auth/me`, removing one serial round trip before links appear. The cache holds no credential; a `401` clears it.
 - Add preconnect only if a measured API-origin handshake is on the critical path; no blanket hints for preview or unrelated origins. In production the API is same-origin behind the rewrite, so no cross-origin preconnect is needed.
 
 ## Cache efficiency must preserve authorization
@@ -36,7 +38,7 @@ Correctness comes first:
 
 - Public metadata, workspace-scoped link data and legacy-token data use distinct keys. Workspace keys include the workspace ID; legacy keys include code and a non-secret credential generation; analytics also includes the validated UTC range/interval. Tokens or token hashes must never be key material.
 - On sign-out, session expiry, workspace switch or legacy-token replacement/rejection/forget, cancel/remove private queries and clear their displayed/retained results. Ignore late responses from old scopes, including stale 401s that must not reject a newer credential. Apply the same behavior across tabs for legacy tokens.
-- Never persist Query data or token-bearing mutation results. Browser localStorage is limited to the active workspace ID and explicit legacy-token remembrance; memory is the default.
+- Never persist Query data or token-bearing mutation results. Browser localStorage is limited to the active workspace ID, the token-free account summary and explicit legacy-token remembrance; memory is the default.
 - Retain last successful analytics while a same-scope refresh/range request is pending, labeled with its real range and an updating/error state. Do not reuse it across codes, workspaces or credentials, or after authoritative access/state rejection.
 - Do not prefetch analytics without an authorized scope or let a fresh old cache entry hide a rejected replacement credential. Test that supplying a session to metadata actually scopes the read to the requested workspace.
 
@@ -75,7 +77,7 @@ bun run --cwd "./urlshortner" preview --host 127.0.0.1
 These existing scripts can exercise the built app; no product baseline or successful build is asserted here. The [deployment guide](deployment.md) contains frozen-install and verification prerequisites.
 
 1. **Bundle/build:** record compressed initial and route chunks; use browser Network to confirm charts are absent on `/` and not redundantly downloaded during navigation.
-2. **Interaction:** trace sign-in, workspace switch, create through response, route navigation, date changes and manual refresh. Separate network wait from render work with browser/React profiling; check pending/retained states under slow and failed requests.
+2. **Interaction:** use each API response's `Server-Timing` header (Postgres, Redis and total server time; see [observability](../backend/observability.md#server-timing)) to separate server work from network and cold-start time. Trace sign-in, workspace switch, create through response, route navigation, date changes and manual refresh. Separate network wait from render work with browser/React profiling; check pending/retained states under slow and failed requests.
 3. **Authorization regression:** switch workspaces, sign out, and replace/forget legacy tokens during slow metadata and analytics requests; exercise cross-tab removal. Confirm no old private data reappears, no private HTTP cache hits occur and query keys/devtools contain no token or cookie.
 4. **Delivery:** compare cold/warm reloads and deep links on a controlled preview; inspect HTML, hashed assets, all API response classes and `no-store` headers.
 5. **Future CI:** after tooling and repeatable baselines exist, add bundle-budget and browser regression gates. Until then document measured deltas in review rather than claiming automated enforcement.

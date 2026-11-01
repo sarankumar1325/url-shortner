@@ -12,7 +12,7 @@ Status: accounts, sessions, password rotation, workspace RBAC and lifecycle cont
 | Credential stuffing / brute force | Argon2id, per-IP and per-account limits, uniform login failures | No MFA or breached-password check in v1 |
 | Account enumeration | Uniform `401 invalid_credentials`, dummy hash verification | Signup still reveals that an email is taken |
 | CSRF on cookie writes | `SameSite=Lax`, exact-Origin/Referer check, JSON-only bodies | Misconfigured allowed origin would weaken it |
-| Session theft | Opaque token in `HttpOnly` cookie, digest at rest, 30-day expiry, server-side listing/revoke | No rotation, theft detection or automatic role-change revocation |
+| Session theft | Opaque token in `HttpOnly` cookie, digest at rest, 30-day renewing expiry (24 hours without "Stay signed in"), server-side listing/revoke | No token rotation on renewal, theft detection or automatic role-change revocation |
 | Cross-tenant access | Membership lookup, `404` for non-members, workspace-scoped queries | Broken query scoping would bypass it; tests are the guard |
 | Retry creates duplicate/unmanageable link | Same-transaction Postgres replay record | Replay key is a capability, valid 24 hours |
 | Cache serves deleted/malicious target | Bounded positive TTL, invalidation, edge deny for urgent takedown | Invalidation alone is not strict revocation |
@@ -28,14 +28,17 @@ Reject self-shortening to configured API/redirect hosts. Preserve path/query sem
 
 ## Identity and sessions
 
-- Passwords are 10–128 characters and stored only as Argon2id hashes (`argon2-cffi` defaults). Unknown-email logins run a dummy verification so response timing does not disclose account existence.
+- Passwords are 10–128 characters and stored only as Argon2id hashes with the OWASP minimum parameters (`t=2`, `m=19456` KiB, `p=1`). A successful login checks `password_needs_rehash` and rewrites hashes made with older parameters. Unknown-email logins run a dummy verification so response timing does not disclose account existence; the dummy hash is computed on first use rather than at import.
 - Emails are trimmed and lowercased before lookup and uniqueness checks. Signup/Login errors must not echo passwords or hash details.
 - No email verification, password reset, MFA or OAuth exists. Treat these as unsupported, not as implied safety. Users who know their password can rotate it; an attacker with the old password loses access immediately after that change.
 - Sessions use a random 256-bit `shrs_` token; only its SHA-256 digest is stored. The raw value travels solely in the `shortly_session` cookie.
 - Each session row also carries a non-secret public UUID used for listing and targeted revocation. List responses include `created_at`, `expires_at` and a `current` flag; they never include the token or digest.
-- Cookie flags: `HttpOnly`, `SameSite=Lax`, `Path=/`, 30-day `Max-Age`, and `Secure` when `ENVIRONMENT` is `production` or `preview`. Do not expose the token to JavaScript or persist it in localStorage.
+- Cookie flags: `HttpOnly`, `SameSite=Lax`, `Path=/`, and `Secure` when `ENVIRONMENT` is `production` or `preview`. Do not expose the token to JavaScript or persist it in localStorage.
+- "Stay signed in" (`remember`, default on) issues a persistent session: a 30-day `Max-Age` cookie whose row is extended to 30 days, and the cookie re-sent by `SessionRenewalMiddleware`, once it is past half its life. Unchecked, the cookie has no `Max-Age` so it ends with the browser, and the row expires after 24 hours without renewal, so a restored browser session cannot keep it alive. Renewal extends the same token; it is not rotation.
+- The SPA keeps the last account summary (user and workspace list, never a token) in localStorage under `shortly.session.v1` so it can draw the shell before `/auth/me` answers. It grants nothing; a `401` clears it. It does contain the email and workspace names, so it is personal data on a shared device until sign-out.
 - Logout deletes the server session row and clears the cookie. Expired rows are rejected and deleted on lookup. Changing a password deletes every other session in the same commit while preserving the caller's session; changing a role does not revoke sessions, so removal/role limits are enforced on every request.
 - Revoking a session is scoped by `user_id`; another user's session ID returns `404 session_not_found`. Revoking other sessions never deletes the current one.
+- Account deletion (`DELETE /auth/account`) requires the current password and the account email typed again, is same-origin checked and limited to 10/hour/user. It refuses (`409 owns_shared_workspaces`) while the user owns a shared workspace with other members, because ownership cannot be dropped silently. It deletes the personal workspace, sole-member workspaces and the user row in one transaction; sessions end with it and the cookie is cleared.
 - Session tokens are independent of `SECRET_KEY`; rotating the application secret invalidates legacy management tokens and replay ciphertexts but not active sessions. Revocation is explicit session-row deletion.
 
 ### CSRF and CORS
@@ -99,8 +102,9 @@ Implemented limits are per-IP or per-account and fail closed when Redis is unava
 | Operation | Limit |
 | --- | --- |
 | Signup | 10 per hour per IP |
-| Login | 30 per minute per IP and 10 per minute per email |
+| Login | 30 per minute per IP and 10 per minute per email, checked in one Redis pipeline |
 | Password change | 10 per hour per user |
+| Account deletion | 10 per hour per user |
 | Invite preview | 60 per minute per IP |
 | Workspace creation | 10 per hour per user |
 | Link creation, authenticated | 60 per minute per workspace |
@@ -112,7 +116,8 @@ Implemented limits are per-IP or per-account and fail closed when Redis is unava
 - Trust only platform-overwritten IP metadata; arbitrary forwarded headers are attacker input. Per-IP budgets are not identity/authentication, and shared NAT can affect multiple users.
 - Publish reporting/security contact details before public creation opens. Do not publish placeholder contact addresses.
 - For immediate malicious-code revocation, apply and verify a deny rule across every backend hostname, then commit `is_blocked` and invalidate. Without a suitable edge control, document the redirect-cache TTL of stale risk or use authoritative DB checks; do not claim zero delay.
-- Maintain an auditable erasure procedure for accounts, destinations and events, retaining only a code tombstone where necessary to prevent reuse. Account deletion is not exposed in v1; any operator procedure must handle shared workspaces deliberately.
+- Maintain an auditable erasure procedure for accounts, destinations and events, retaining only a code tombstone where necessary to prevent reuse. Self-service account deletion and workspace deletion keep that tombstone in `retired_short_codes` (code, reason, time; no destination or owner), so a printed or shared code can never start pointing somewhere new. Backups still hold deleted data until they expire.
+- Test accounts are removed with `uv run python -m backend.scripts.delete_accounts --email-like 'qa-droid-%@example.com'`: a dry run by default, `--yes` to delete. It refuses patterns without `@` or with fewer than three literal leading characters, and applies the same shared-workspace rule as the API.
 - Automated reputation scanning is deferred, not a release control already present.
 
 ## HTTP and browser security
@@ -132,7 +137,7 @@ Accounts add durable personal data: email, display name, password hash, membersh
 
 Rich analytics need event time, country, referrer origin, device category and bot classification—not persistent IP hashes. Raw IP is transient limiter input only; rate-limit keys expire and are not logged or correlated with analytics. Store no raw UA in Postgres and no referrer path/query/fragment anywhere in durable events.
 
-Stream UA is bounded and short-lived; malformed diagnostics contain only IDs/reasons. Proposed retention: raw events 90 UTC days, totals two years, replay responses 24 hours, sessions 30 days, invitations 7 days or until consumed, and redacted diagnostics at most seven days. Aggregate or pseudonymous data may still be personal data; hashing alone does not make information anonymous.
+Stream UA is bounded and short-lived; malformed diagnostics contain only IDs/reasons. Proposed retention: raw events 90 UTC days, totals two years, replay responses 24 hours, sessions 30 days renewing (24 hours when not persistent), invitations 7 days or until consumed, and redacted diagnostics at most seven days. Aggregate or pseudonymous data may still be personal data; hashing alone does not make information anonymous.
 
 Review destination URLs too: they can contain personal data or access credentials. Limit database/backup access, prohibit logging full targets, and define retention after deletion. Do not assert that first-party cookies are exempt from privacy obligations.
 
@@ -152,10 +157,11 @@ Use frozen lockfile installs, dependency audits and secret scanning. Ruff `B` is
 - [ ] Token isolation, encrypted replay concurrency/crash tests and key rotation.
 - [x] Password change revokes every other session while preserving the current one; session listing, per-session revoke and revoke-others verified.
 - [x] Workspace rename/delete/transfer RBAC, cross-tenant `404`s, exact-name confirmation and ownership swap verified in production.
+- [x] Self-service account deletion with password and email confirmation, shared-workspace guard and code retirement; covered by backend tests and the Playwright journey.
 - [ ] Role-change revocation policy, brute-force alerting and durable per-code caps.
 - [ ] No sensitive content in application/validation/access/error telemetry; vendor log settings reviewed.
 - [ ] Private-cache clearing on workspace/session change, logout and cross-tab events verified end to end.
 - [ ] Fail-closed auth/management and bounded fail-open redirect overload tests.
-- [ ] Operator takedown on all hosts, account-erasure procedure and backup restore drill.
+- [ ] Operator takedown on all hosts, backup-erasure procedure and backup restore drill.
 - [ ] Retention and scheduler auth active before collecting production events.
 - [ ] Dependency/secret scans and privacy review complete; documented exceptions accepted explicitly.

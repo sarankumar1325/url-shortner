@@ -4,7 +4,7 @@ Status: accounts/workspaces release deployed to Vercel and smoke-tested 2026-10-
 
 ## What exists and what remains gated
 
-The frontend is `urlshortner/`, with React/Vite source, product auth/workspace routes, a typed API client, `bun.lock`, an environment example, a same-origin `/api` rewrite plus SPA fallback in `vercel.json`, and `dev`, `lint`, `test`, `build`, `preview` scripts. `build` runs `tsc -b && vite build`. There is still no `packageManager` pin, generated API types or browser-test setup. Existing `dist/` output does not by itself establish product readiness.
+The frontend is `urlshortner/`, with React/Vite source, product auth/workspace routes, a typed API client, `bun.lock`, an environment example, a same-origin `/api` rewrite plus SPA fallback in `vercel.json`, and `dev`, `lint`, `test`, `build`, `preview` scripts. `build` runs `tsc -b && vite build`. There is still no `packageManager` pin or generated API types. A Playwright journey lives in `e2e/` ([below](#end-to-end-tests)). Existing `dist/` output does not by itself establish product readiness.
 
 A live deployment exists at `https://shortlyyy-web.vercel.app`, built from the `urlshortner` root directory against `https://shortlyyy-api.vercel.app`. The smoke test covered sign-up/sign-in, the personal workspace, workspace creation, invitation acceptance, role-based controls, link create/copy/redirect, analytics, pause/resume, legacy-token access and delete. It did not cover unknown-route HTTP status, response-header policy, preview isolation or accessibility; those gates remain open. Backend package/entrypoint resolution is covered by [backend deployment](../backend/deployment.md).
 
@@ -22,7 +22,7 @@ A live deployment exists at `https://shortlyyy-web.vercel.app`, built from the `
 | CORS | Production API accepts only the exact web origin with credentials; preflight allows `X-Workspace-Id` |
 | SPA delivery | `/`, direct `/links/:code` and fingerprinted `/assets/*` load on the hosted host |
 
-Not verified: performance/load, HTML/asset cache and security headers, CSP, unknown-route 404 semantics, preview environments, custom domains, automated browser/a11y suites, cross-tab state. Treat the deployment as a working demonstration, not a release-approved service.
+Not verified: performance/load, HTML/asset cache and security headers, CSP, unknown-route 404 semantics, preview environments, custom domains, automated a11y suites, cross-tab state. The Playwright journey covers one happy path, not the full browser matrix. Treat the deployment as a working demonstration, not a release-approved service.
 
 ## Project settings to verify
 
@@ -121,10 +121,23 @@ The following commands are **planned only**, after the corresponding scripts/dep
 ```bash
 bun run --cwd "./urlshortner" api:types
 git diff --exit-code -- "./urlshortner/src/shared/api/schema.d.ts"
-bun run --cwd "./urlshortner" test:e2e
 ```
 
-`bun run test` already exists and runs `bun test`. Define `api:types` to use a pinned local generator against a verified backend OpenAPI snapshot or controlled running API. Commit generated types; CI should regenerate and detect drift before compiling. Define `test:e2e` for the controlled preview/local stack. Until these exist, do not advertise them as successful checks or installed capabilities. Bundle/accessibility gates likewise require implementation and a recorded baseline; see [performance](performance.md).
+`bun run test` already exists and runs `bun test`. Define `api:types` to use a pinned local generator against a verified backend OpenAPI snapshot or controlled running API. Commit generated types; CI should regenerate and detect drift before compiling. Until it exists, do not advertise it as a successful check or installed capability. Bundle/accessibility gates likewise require implementation and a recorded baseline; see [performance](performance.md).
+
+## End-to-end tests
+
+Playwright runs one serial journey in Chromium with clipboard permissions: `urlshortner/e2e/journey.e2e.ts`, helpers in `e2e/account.ts`, configuration in `urlshortner/playwright.config.ts`. Files are named `*.e2e.ts` so `bun test` does not pick them up.
+
+```bash
+(cd urlshortner && bunx playwright install chromium)        # once
+bun run --cwd "./urlshortner" e2e                          # local: starts Vite on :5173; API must run at 127.0.0.1:8000
+E2E_BASE_URL=https://shortlyyy-web.vercel.app bun run --cwd "./urlshortner" e2e
+```
+
+`E2E_BASE_URL` selects the target; without it the config starts (or reuses) `bun run dev` on `http://localhost:5173`. The journey signs up a fresh `qa-droid-<timestamp>@example.com` account and covers: landing in the personal workspace; pasting into the destination field and a global paste; create, focus on **Copy link** and the full URL on the clipboard; copying a hovered row with `c`; `Server-Timing` on API responses; sign-out, a rejected wrong password and sign-in; "Stay signed in" surviving a simulated browser restart (persistent cookies kept, session cookies dropped) while an unchecked box does not; and deleting the account from Settings. `afterAll` deletes the account through the API even when a test fails. Any leftovers can be removed with the [cleanup script](../backend/deployment.md#test-account-cleanup).
+
+`.github/workflows/e2e.yml` runs the same suite manually (`workflow_dispatch`) against its `base_url` input, default `https://shortlyyy-web.vercel.app`, and uploads the report on failure. It is not part of push CI. Running it against production creates and deletes one real account.
 
 ## Preview and production gates
 

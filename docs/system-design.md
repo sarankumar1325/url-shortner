@@ -28,7 +28,12 @@ flowchart LR
 | Analytics off the hot path | Each redirect appends one event to a Redis Stream. A consumer drains it in batches into Postgres later. | Charts are eventually consistent. | `backend/src/backend/services/analytics.py` |
 | Daily rollups | Ingestion upserts `click_daily` counters keyed by `(url_id, day)` in a consistent order to avoid deadlocks. | Finer breakdowns need raw clicks, kept 90 days. | `backend/src/backend/services/analytics.py` |
 | Cached top-links leaderboard | The ranking over daily rollups is cached per workspace for 60 seconds, behind single-flight. | Rankings lag by up to a minute plus queued events. | `backend/src/backend/services/leaderboard.py` |
-| Random base62 codes | Five CSPRNG base62 characters (~916 million codes). A unique index catches collisions; creation retries up to five times. | Codes are unguessable but unordered. | `backend/src/backend/core/security.py` |
+| Random base62 codes | Five CSPRNG base62 characters (~916 million codes). A unique index catches collisions; creation retries up to five times. Retired codes are skipped. | Codes are unguessable but unordered. | `backend/src/backend/core/security.py` |
+| One-query session context | Each authenticated request loads the session, user and selected workspace role in one joined query, and renews a persistent session in the same request when needed. | One wider query instead of three narrow ones. | `backend/src/backend/services/auth.py` |
+| Pipelined rate limits | `check_rate_limits` sends several fixed-window counters in one Redis pipeline; login checks per-IP and per-account limits in one round trip. | All rules share one failure policy. | `backend/src/backend/services/ratelimit.py` |
+| Server-Timing | Every response reports Postgres and Redis time and call counts plus the total, visible in the browser's Network panel. | Covers work done before the response starts, not streaming. | `backend/src/backend/core/timing.py` |
+| Warm-up on auth pages | The login and signup pages fetch `/api/v1/ready` once on mount, so a cold function and database start while the user types. | One extra request per visit. | `urlshortner/src/api.ts` |
+| Cached app shell | The last account summary (no token) is kept in localStorage; on reload the shell renders from it and links load in parallel with `/auth/me`. A `401` clears it. | The shell can show stale workspace names for one round trip. | `urlshortner/src/sessionCache.ts` |
 
 ## Reliability
 
@@ -40,7 +45,7 @@ flowchart LR
 | Idempotency keys | Each create carries an `Idempotency-Key`; the first response is stored encrypted and replayed for 24 hours. | Very late retries create new links. | `backend/src/backend/services/links.py` |
 | Atomic guarded counters | One `UPDATE ... WHERE clicks_used < max_clicks` enforces visit limits under concurrency. | Limited links always hit Postgres for that check. | `backend/src/backend/services/links.py` |
 | Drain on read | Opening analytics drains a bounded batch first, because the free plan only allows a daily cron. | The first view after a busy period is slower. | `backend/src/backend/api/routes/links.py` |
-| Liveness and readiness | `/health` does no I/O; `/ready` runs `SELECT 1` and `PING`. | One instance at one moment. | `backend/src/backend/api/routes/health.py` |
+| Liveness and readiness | `/health` does no I/O; `/ready` runs `SELECT 1` and `PING`. Both are also served under `/api/v1/` for warm-up through the web app's rewrite. | One instance at one moment. | `backend/src/backend/api/routes/health.py` |
 
 ## Data, security and product safety
 
@@ -48,8 +53,11 @@ flowchart LR
 | --- | --- | --- |
 | Workspaces with RBAC | `X-Workspace-Id` is resolved against membership on every request; owner > admin > member > viewer. | `backend/src/backend/api/deps.py` |
 | Soft deletes | Deleted codes stay in the unique index and are never reissued. | `backend/src/backend/services/links.py` |
+| Retired codes | Workspace and account deletion copy their codes into `retired_short_codes` before the hard delete, so no code is ever reissued. | `backend/src/backend/services/retired_codes.py` |
 | Tiered retention | Raw clicks 90 days, rollups two years, deleted in batches of 1,000. | `backend/src/backend/services/analytics.py` |
-| Argon2id and hashed tokens | Passwords use Argon2id; session tokens are SHA-256 hashes; management tokens are HMACs. | `backend/src/backend/core/security.py` |
+| Argon2id and hashed tokens | Passwords use Argon2id at OWASP parameters (t=2, 19 MiB, p=1) and are rehashed on login when the parameters change; session tokens are SHA-256 hashes; management tokens are HMACs. | `backend/src/backend/core/security.py` |
+| Stay signed in | Persistent sessions get a 30-day cookie that renews past half its life; otherwise a browser-session cookie and a 24-hour server expiry. | `backend/src/backend/api/deps.py` |
+| Self-service account deletion | Password plus typed email; blocked while the user owns shared workspaces with other members. | `backend/src/backend/services/accounts.py` |
 | HKDF and AES-GCM | One secret is expanded into a token pepper and a replay-encryption key. | `backend/src/backend/core/security.py` |
 | Origin checks | Cookie-authenticated writes must come from an allowed origin. | `backend/src/backend/api/deps.py` |
 | Destination validation | Rejects private/reserved IPs, local names, blocked hosts and redirect loops. | `backend/src/backend/services/validation.py` |

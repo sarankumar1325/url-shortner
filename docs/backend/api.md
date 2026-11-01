@@ -8,6 +8,7 @@ Status: implemented and verified in production 2026-10-25 · [Architecture](arch
 - UTF-8 JSON, `snake_case`, UTC ISO 8601 timestamps. Reject unknown mutation fields.
 - All API, redirect and error responses use `Cache-Control: no-store`. Cookies and custom auth headers do not prevent HTTP caching by themselves. No shared CDN caching of private responses.
 - Return `X-Request-ID`; accept a bounded validated UUID from callers or generate one. Never reflect arbitrary header text in logs.
+- Every response carries `Server-Timing: db;dur=…;desc="Postgres xN", redis;dur=…;desc="Redis xN", total;dur=…` with the time and call count spent in each dependency for that request. See [observability](observability.md#server-timing).
 - Failures use [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) `application/problem+json`; OpenAPI describes response models, auth, errors and headers.
 - Enforce a 64 KiB JSON body size while reading (not just trusting Content-Length); the serialized destination limit is 8192 characters. Return `413` for an oversized body.
 
@@ -17,16 +18,17 @@ V1 now has first-party accounts, workspaces and role-based access, plus a legacy
 
 ### Browser sessions
 
-- `POST /auth/signup` and `POST /auth/login` set an opaque `shortly_session` cookie: `HttpOnly`, `SameSite=Lax`, `Path=/`, 30-day max age, and `Secure` when `ENVIRONMENT` is `production` or `preview`.
+- `POST /auth/signup` and `POST /auth/login` set an opaque `shortly_session` cookie: `HttpOnly`, `SameSite=Lax`, `Path=/`, and `Secure` when `ENVIRONMENT` is `production` or `preview`.
+- Both accept `remember` (boolean, default `true`, the UI's "Stay signed in"). A persistent session gets a 30-day `Max-Age` cookie; once it is past half its life, any authenticated request extends the row to a fresh 30 days and re-sends the cookie with a new `Max-Age`. With `remember: false` the cookie has no `Max-Age` (it ends when the browser closes) and the server row expires after 24 hours (`SHORT_SESSION_TTL_SECONDS`) without renewal. The flag is stored as `user_sessions.persistent`.
 - Raw session tokens are `shrs_` strings shown only in the cookie. The database stores a SHA-256 digest in `user_sessions`.
 - The SPA sends `credentials: 'include'` and never reads or stores the cookie value.
 - `POST /auth/logout` deletes the server-side row and clears the cookie. Expired sessions are rejected and removed on lookup.
 - Every session also has a non-secret public UUID (`user_sessions.id`). Session listing returns `{id, created_at, expires_at, current}` and never exposes the token digest.
 - `POST /auth/password` verifies the current password, rejects a reused password, rotates the Argon2id hash, deletes every other session, and keeps the caller signed in. It is same-origin checked and limited to 10 attempts/hour/user; a wrong current password is `403 invalid_password`.
 - Cookie-authenticated writes (`POST`, `PATCH`, `DELETE`) require an `Origin` or `Referer` allowed by `CORS_ORIGINS`; otherwise `403 csrf_rejected`. Non-browser callers without either header are allowed because they cannot be tricked into sending a victim's cookie.
-- Signup and login share an intentionally indistinguishable `401 invalid_credentials` for unknown email or wrong password. Unknown emails still run a dummy Argon2 verification.
+- Signup and login share an intentionally indistinguishable `401 invalid_credentials` for unknown email or wrong password. Unknown emails still run a dummy Argon2 verification. A successful login rehashes a password stored with older Argon2 parameters.
 
-Passwords are 10–128 characters and stored only as Argon2id hashes. Emails are trimmed and lowercased. There is no email verification, password reset, SSO, MFA or account-deletion endpoint in v1. Users can change a known password and revoke individual sessions or all other sessions.
+Passwords are 10–128 characters and stored only as Argon2id hashes. Emails are trimmed and lowercased. There is no email verification, password reset, SSO or MFA in v1. Users can change a known password, revoke individual sessions or all other sessions, and delete their own account.
 
 ### Workspaces and roles
 
@@ -78,6 +80,7 @@ For public unauthenticated resolution: missing/deleted/blocked/inactive → `404
 | GET | `/api/v1/auth/sessions` | `200` active sessions with a public id and `current` flag |
 | DELETE | `/api/v1/auth/sessions/{session_id}` | `204`; revoke one session owned by the caller |
 | POST | `/api/v1/auth/sessions/revoke-others` | `200` `{"revoked": n}`; keeps the current session |
+| DELETE | `/api/v1/auth/account` | `204` with `{password, confirm_email}`; deletes the account and the workspaces only it uses, clears the cookie |
 | POST | `/api/v1/workspaces` | `201` shared workspace; caller becomes owner |
 | PATCH | `/api/v1/workspaces/{workspace_id}` | `200` renamed workspace summary (`admin+`) |
 | DELETE | `/api/v1/workspaces/{workspace_id}` | `204` hard delete with `{confirm_name}` (`owner`, non-personal) |
@@ -97,7 +100,7 @@ For public unauthenticated resolution: missing/deleted/blocked/inactive → `404
 | --- | --- | --- |
 | POST | `/api/v1/links` | `201` creation; token only for legacy unowned links |
 | GET | `/api/v1/links` | `200` workspace links with `clicks_30d` |
-| GET | `/api/v1/links/availability?alias=` | `200` whether a custom alias is free, with `reason` `invalid`/`reserved`/`taken`; public, rate limited per IP |
+| GET | `/api/v1/links/availability?alias=` | `200` whether a custom alias is free, with `reason` `invalid`/`reserved`/`taken` (`taken` includes soft-deleted and retired codes); public, rate limited per IP |
 | GET | `/api/v1/links/top?days=&limit=` | `200` most-clicked workspace links over 1, 7 or 30 days; cached 60 seconds |
 | GET | `/api/v1/links/{code}` | `200` metadata; workspace, token or public access |
 | PATCH | `/api/v1/links/{code}` | `200` updated metadata |
@@ -110,6 +113,7 @@ For public unauthenticated resolution: missing/deleted/blocked/inactive → `404
 | POST | `/api/v1/system/trace` | `200` one redirect traced step by step with server timings (`{"code", "cold"}`); never counts a click or consumes a visit; workspace links only (`404` otherwise), same-origin, rate limited per user |
 | GET | `/health` | Dependency-free liveness |
 | GET | `/ready` | Dependency readiness; `503` if required service unavailable |
+| GET | `/api/v1/health`, `/api/v1/ready` | Same probes under the API prefix, so the web app can warm the function and database through its same-origin `/api` rewrite |
 | GET | `/internal/analytics/drain` | Cron-authenticated ingestion; no public data |
 | GET | `/internal/analytics/status` | Cron-authenticated queue backlog, pending age, lag and dead-letter counts |
 | GET | `/internal/maintenance` | Cron-authenticated bounded retention cleanup |
@@ -126,11 +130,12 @@ Origin: https://shortlyyy-web.vercel.app
 {
   "email": "person@example.com",
   "password": "a-long-enough-password",
-  "display_name": "Saran"
+  "display_name": "Saran",
+  "remember": true
 }
 ```
 
-`201` plus `Set-Cookie: shortly_session=shrs_…; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000`:
+`201` plus `Set-Cookie: shortly_session=shrs_…; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000` (no `Max-Age` when `remember` is `false`):
 
 ```json
 {
@@ -197,6 +202,19 @@ GET /api/v1/auth/sessions
 
 `DELETE /auth/sessions/{session_id}` revokes one session and returns `204`; the public ID is scoped to the caller, so another user's ID is `404 session_not_found`. `POST /auth/sessions/revoke-others` deletes every other session and returns `{"revoked": n}`. No response ever contains a token or token digest.
 
+### Account deletion
+
+```http
+DELETE /api/v1/auth/account
+Content-Type: application/json
+
+{ "password": "current-password", "confirm_email": "person@example.com" }
+```
+
+`204` and a cleared cookie on success. A wrong password is `403 invalid_password`; `confirm_email` must match the account email after trimming and lowercasing (`422 confirmation_mismatch`). If the caller owns a shared workspace that still has other members, the request is `409 owns_shared_workspaces` and nothing changes; its `errors[]` lists each blocking workspace with `workspace_id` and `name`, so the user can transfer or delete them first.
+
+Otherwise one transaction deletes the personal workspace, every shared workspace where the caller is the only member, and the user row. Sessions and memberships cascade with the user. Links the user created in other people's workspaces stay there with `created_by_user_id` cleared. Codes from the deleted workspaces are recorded in `retired_short_codes` so they are never reissued, and their redirect cache entries are invalidated. Same-origin checked and limited to 10 attempts/hour/user.
+
 ### Workspace lifecycle
 
 ```http
@@ -217,7 +235,7 @@ Content-Type: application/json
 { "confirm_name": "Acme Team" }
 ```
 
-`204` hard delete. `confirm_name` must equal the trimmed workspace name (`422 confirmation_mismatch`). Owner only, non-personal only (`403 personal_workspace`). Links, clicks, invitations and memberships cascade.
+`204` hard delete. `confirm_name` must equal the trimmed workspace name (`422 confirmation_mismatch`). Owner only, non-personal only (`403 personal_workspace`). Links, clicks, invitations and memberships cascade. The workspace's codes, including soft-deleted ones, are copied into `retired_short_codes` first so they can never be reissued, and their redirect cache entries are invalidated.
 
 ```http
 POST /api/v1/workspaces/{workspace_id}/transfer-ownership
@@ -248,7 +266,7 @@ Idempotency-Key: 8f14e45f-ea4d-4b1e-9c1a-5f0e2d7a6b31
 ```
 
 - `long_url`: required absolute HTTP(S) URL; [validation policy](short-links.md#destination-validation).
-- `custom_alias`: optional/null; lowercase `^[a-z0-9][a-z0-9_-]{1,30}[a-z0-9]$`, 3–32 characters, not reserved. Missing/null means generated code.
+- `custom_alias`: optional/null; lowercase `^[a-z0-9][a-z0-9_-]{1,30}[a-z0-9]$`, 3–32 characters, not reserved. Missing/null means generated code. An alias in use, soft-deleted or retired by a workspace/account deletion is `409 alias_taken`; generated codes skip retired values.
 - `expires_at`: optional/null means no expiry; otherwise strictly future, at most five years ahead.
 - `fallback_url`: optional/null; validated like `long_url`, errors use field `fallback_url`. Visitors are sent here once the link expires or runs out of visits.
 - `max_clicks`: optional/null; integer 1–1,000,000. Each counted redirect uses one visit; once used up, redirects go to `fallback_url` or return `410 link_exhausted`.
@@ -300,7 +318,7 @@ PATCH accepts only `long_url`, `expires_at`, `is_active`, `tags`, `fallback_url`
 
 For v1, concurrent valid PATCH operations use last-committed-write-wins for supplied fields. Do not auto-retry PATCH after ambiguous failure: read authenticated metadata and ask the user to confirm.
 
-DELETE soft-deletes atomically and invalidates the cache. Workspace callers need `member`; legacy repeat DELETE with the correct token returns `204`; unknown or operator-blocked codes return `404`. The token cannot read analytics or mutate a deleted link. Account/workspace deletion is a separate hard-delete path; replay rows cascade with links.
+DELETE soft-deletes atomically and invalidates the cache. Workspace callers need `member`; legacy repeat DELETE with the correct token returns `204`; unknown or operator-blocked codes return `404`. The token cannot read analytics or mutate a deleted link. Account/workspace deletion is a separate hard-delete path; replay rows cascade with links, and the codes move to `retired_short_codes` so they stay unavailable.
 
 Redirect changes may take up to the 60-second [cache-age bound](caching-and-scale.md#freshness-and-mutation-races); do not promise immediate revocation from a `200`/`204`. Urgent abuse takedowns use the edge control described in security docs.
 
@@ -415,7 +433,7 @@ When a `404` or `410` request accepts `text/html`, the response is an escaped, s
 | 401 | `authentication_required`, `invalid_credentials`, `invalid_token` |
 | 403 | `forbidden`, `csrf_rejected`, `invalid_password`, `personal_workspace` |
 | 404 | `link_not_found`, `workspace_not_found`, `member_not_found`, `invitation_not_found`, `session_not_found` |
-| 409 | `email_taken`, `alias_taken`, `idempotency_conflict`, `request_in_progress`, `owner_conflict` |
+| 409 | `email_taken`, `alias_taken`, `idempotency_conflict`, `request_in_progress`, `owner_conflict`, `owns_shared_workspaces` |
 | 410 | `link_expired` |
 | 413 | `payload_too_large` |
 | 422 | `validation_error` (including invalid idempotency key, self role change, invalid role), `confirmation_mismatch` |
@@ -425,12 +443,12 @@ When a `404` or `410` request accepts `text/html`, the response is an escaped, s
 
 Validation errors carry `errors: [{field, code, message}]`; never include Pydantic's raw input, passwords, cookies, tokens or destination in telemetry. A 409 is not always an alias collision.
 
-Initial limits: signup 10/hour/IP; login 30/minute/IP plus 10/minute/account; password change 10/hour/user; invite preview 60/minute/IP; workspace creation 10/hour/user; workspace link creation 60/minute/workspace; legacy create 20/minute/IP; redirect 600/minute/IP; public metadata 120/minute/IP; legacy management/analytics 60/minute. The limiter fails closed for account, creation and management paths. Limits are in [caching-and-scale.md](caching-and-scale.md).
+Initial limits: signup 10/hour/IP; login 30/minute/IP plus 10/minute/account (both checked in one Redis pipeline); password change 10/hour/user; account deletion 10/hour/user; invite preview 60/minute/IP; workspace creation 10/hour/user; workspace link creation 60/minute/workspace; legacy create 20/minute/IP; redirect 600/minute/IP; public metadata 120/minute/IP; legacy management/analytics 60/minute. The limiter fails closed for account, creation and management paths. Limits are in [caching-and-scale.md](caching-and-scale.md).
 
 `429` always carries integer `Retry-After` seconds. Optional `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` use delta-seconds. Cron uses constant-time bearer validation against **`CRON_SECRET`**, rejects missing configuration and unauthorized callers, and returns only processing counts.
 
 ## CORS and schema
 
-CORS allows only exact approved origins, with credentials enabled for the cookie flow. Methods: `GET`, `HEAD`, `POST`, `PATCH`, `DELETE`, `OPTIONS`. Allow `Content-Type`, `Idempotency-Key`, `X-Management-Token`, `X-Request-ID` and `X-Workspace-Id`; expose `Location`, `X-Request-ID`, rate-limit headers and `Retry-After`. Preflight never triggers a click or consumes mutation limits. Origin/Referer validation is a separate CSRF check, not a substitute for CORS.
+CORS allows only exact approved origins, with credentials enabled for the cookie flow. Methods: `GET`, `HEAD`, `POST`, `PATCH`, `DELETE`, `OPTIONS`. Allow `Content-Type`, `Idempotency-Key`, `X-Management-Token`, `X-Request-ID` and `X-Workspace-Id`; expose `Location`, `X-Request-ID`, rate-limit headers, `Retry-After` and `Server-Timing`. Preflight never triggers a click or consumes mutation limits. Origin/Referer validation is a separate CSRF check, not a substitute for CORS.
 
 `/openapi.json` is public and contains no secrets; `/docs` and `/redoc` are local/preview only. Frontend types are currently hand-written.

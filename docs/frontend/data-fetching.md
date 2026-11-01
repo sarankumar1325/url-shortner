@@ -1,12 +1,14 @@
 # Data Fetching and API Integration
 
-Status: typed fetch transport and auth/workspace flows implemented; generated types, Query and E2E suites remain target · Related: [API contract](../backend/api.md), [analytics](../backend/analytics.md), [architecture](architecture.md)
+Status: typed fetch transport and auth/workspace flows implemented; one Playwright journey exists; generated types and Query remain target · Related: [API contract](../backend/api.md), [analytics](../backend/analytics.md), [architecture](architecture.md)
 
 ## Transport and generated contracts
 
 Today `src/api.ts` is a hand-written typed transport. The target is generated request/response types from the backend OpenAPI schema, with an `api:types` script using a pinned local generator; commit its output and fail a CI check on regeneration drift. Do not treat hand-written types as authoritative against a changed API. Root-relative verification commands and prerequisites are in [deployment](deployment.md).
 
 Use one transport with per-request headers; components call feature functions. Set `cache: "no-store"` and **`credentials: "include"`** so the `shortly_session` cookie is sent to the same-origin `/api` path. **All API responses**, success or failure, require `Cache-Control: no-store`. There is no service worker or persistent Query cache in V1. Give each attempt an `X-Request-ID`; use the response's request ID for support. Never log bodies, cookies, session tokens, management tokens, idempotency keys or destination URLs. The create key can replay a legacy token and must itself be treated as a secret.
+
+`warmUp()` sends one fire-and-forget `GET /api/v1/ready` (no credentials) the first time the sign-in or sign-up page mounts, so a cold serverless function and database start while the user types. It runs once per page load and ignores failures.
 
 Pass `X-Workspace-Id` for every authenticated workspace request. Pass `X-Management-Token` only for legacy links when the caller supplied that credential. Do not mutate a shared default header, combine both authorization paths, or silently fall back to an unauthenticated request after `401`. Account sessions are never read from or written to JavaScript storage.
 
@@ -50,6 +52,7 @@ Normalize RFC 9457 bodies from `unknown`: validate property types; take HTTP sta
 | 400 / 422 | Field errors from `errors[]`, otherwise form-level message |
 | 401 `authentication_required` | Clear the session view; redirect to `/login?next=…`. Do not retry blindly |
 | 401 `invalid_credentials` | Form-level error; do not reveal whether the email exists |
+| 403 `invalid_password` | Password field error (password change, account deletion) |
 | 401 legacy `invalid_token` | Retire the legacy credential generation and prompt for re-entry |
 | 403 `csrf_rejected` | Configuration/session failure; do not auto-retry |
 | 403 `forbidden` | Role changed or action not permitted; refresh membership/role state |
@@ -59,18 +62,19 @@ Normalize RFC 9457 bodies from `unknown`: validate property types; take HTTP sta
 | 409 `alias_taken` | Alias field conflict; changing the body starts a new create key |
 | 409 `idempotency_conflict` | Stop; do not silently mint a new key for an uncertain request |
 | 409 `request_in_progress` | Offer manual retry of the same pending key/body |
+| 409 `owns_shared_workspaces` | Account deletion blocked; list `errors[]` items by `name` (with `workspace_id`) so the user can transfer or delete them |
 | Other 409 | Show its safe problem detail; never assume every conflict is an alias collision |
 | 410 `link_expired` | Public link expired; authorized metadata/analytics may still unlock it |
-| 429 `rate_limited` | No automatic retry; show when a manual retry is allowed |
+| 429 `rate_limited` | No automatic retry; show when a manual retry is allowed. Sign-in/sign-up count down `Retry-After` and keep the submit button disabled until it ends |
 | 503 | Temporary failure; only the operation-specific retry policy applies |
-| Network / timeout | Preserve input; outcome of a mutation may be unknown |
+| Network / timeout | Preserve input; outcome of a mutation may be unknown. Auth forms distinguish offline (`navigator.onLine` false), unreachable server and timeout, and give 5xx its own message (`src/authFeedback.ts`) |
 | Cancelled | No automatic retry or failure toast; cancellation does not undo a server write |
 
 Request IDs belong in an optional support disclosure, not in the primary error copy.
 
 ## Cancellation, timeouts and retry policy
 
-For **each attempt**, compose the caller's cancellation signal (including TanStack Query's signal, if adopted) with a fresh timeout signal, normally 10 seconds. `AbortSignal.any([callerSignal, AbortSignal.timeout(10_000)])` is suitable only after confirming target-browser support. Otherwise create a controller, forward caller aborts (including an already-aborted signal), and use a timer to abort it with a timeout reason. Clear the timer and remove listeners in `finally` after both fetch and body processing finish.
+For **each attempt**, compose the caller's cancellation signal (including TanStack Query's signal, if adopted) with a fresh timeout signal, normally 10 seconds. Signup, login and account deletion use 30 seconds, because a cold start plus Argon2 can exceed 10 seconds; the form shows "Still signing in…" after 2 seconds instead of giving up on a request that will succeed. `AbortSignal.any([callerSignal, AbortSignal.timeout(10_000)])` is suitable only after confirming target-browser support. Otherwise create a controller, forward caller aborts (including an already-aborted signal), and use a timer to abort it with a timeout reason. Clear the timer and remove listeners in `finally` after both fetch and body processing finish.
 
 Keep the original caller signal and timeout reason so cancellation is not misclassified as a timeout. Check caller cancellation before starting any retry or while waiting for backoff. Use a fresh timeout for the next attempt, not the already-aborted combined signal. For Query, preserve cancellation semantics rather than converting it to a generic network exception. Mutations need their own caller-owned controller; resetting a mutation observer alone does not cancel fetch. Late results must also pass the session/workspace/generation check before touching state.
 
@@ -171,7 +175,7 @@ Apply the same cleanup on cross-tab legacy-token changes. The stored active work
 
 ## Device storage and endpoint states
 
-The session cookie is the only account credential and is never stored in JavaScript. Memory is the default for legacy tokens. Store a versioned, validated, minimal `{code, token}` record in localStorage only after explicit “Remember on this device” consent. The active workspace ID may also be stored because it grants nothing by itself. A local recent-code list is not proof of authorization. Wrap **reads and writes** in error handling: denied storage or quota failure leaves the session usable in memory and reports that remembering failed. Ignore malformed JSON/invalid records without crashing; never print their contents. On load, validate records before using them and give loaded credentials fresh generations.
+The session cookie is the only account credential and is never stored in JavaScript. The last account summary (`shortly.session.v1`, validated on read, never a token) is cached so the shell can render before `/auth/me`; a `401` removes it. Memory is the default for legacy tokens. Store a versioned, validated, minimal `{code, token}` record in localStorage only after explicit “Remember on this device” consent. The active workspace ID may also be stored because it grants nothing by itself. A local recent-code list is not proof of authorization. Wrap **reads and writes** in error handling: denied storage or quota failure leaves the session usable in memory and reports that remembering failed. Ignore malformed JSON/invalid records without crashing; never print their contents. On load, validate records before using them and give loaded credentials fresh generations.
 
 Listen for `storage` events, including removal and `clear()` (`key === null`), and update same-tab subscribers directly because those events fire in other tabs. Reconcile against current storage rather than trusting an old event; forget must not be undone by a stale tab writing its full snapshot back. If removing storage fails, clear memory/private caches anyway and warn that the saved device copy might remain. “Forget” is not server deletion or token revocation.
 
@@ -184,7 +188,8 @@ Listen for `storage` events, including removal and `clear()` (`key === null`), a
 | Workspace list | Session required; returns non-deleted links in that workspace with `clicks_30d` |
 | PATCH | Session+membership (`member`+) or legacy token; wait for server confirmation, then invalidate metadata, list and analytics |
 | DELETE | Session+membership (`member`+) or legacy token; success and repeated deletion with the same valid scope return 204. On confirmed success remove local legacy credential and all cached views for that link |
-| Signup/Login | Sets the session cookie; never returns the raw session token in JSON |
+| Signup/Login | Sets the session cookie; never returns the raw session token in JSON. Sends `remember` from "Stay signed in" |
+| Delete account | `DELETE /auth/account` with `{password, confirm_email}`; on `204` forget local state and the cached summary |
 | Logout | Deletes the server session and clears the cookie; client state must clear even if the request fails |
 
 For uncertain PATCH, re-read authorized metadata before deciding on a manual repeat. For uncertain DELETE, offer a deliberate same-scope repeat; its idempotent 204 contract is not permission for automatic retries. Retain the legacy credential until the outcome is resolved.
@@ -201,4 +206,4 @@ For uncertain PATCH, re-read authorized metadata before deciding on a manual rep
 
 ## Test acceptance
 
-Plan tests for error-shape validation; each 409 code; retry counts and identical create bodies/keys; timeout versus caller abort; late responses after session/workspace/credential changes; private metadata isolation; denied/quota/corrupt storage and cross-tab forget; repeated DELETE; leap days, UTC rollover and 366-day bounds; zero-filled series, clipped breakdowns and nullable freshness. Add auth tests for cookie-session restore, `401` cleanup, `403 csrf_rejected`, invitation acceptance and role-based UI. Mock tests supplement, not replace, an end-to-end preview test of the [backend contract](../backend/api.md).
+Plan tests for error-shape validation; each 409 code; retry counts and identical create bodies/keys; timeout versus caller abort; late responses after session/workspace/credential changes; private metadata isolation; denied/quota/corrupt storage and cross-tab forget; repeated DELETE; leap days, UTC rollover and 366-day bounds; zero-filled series, clipped breakdowns and nullable freshness. Add auth tests for cookie-session restore, `401` cleanup, `403 csrf_rejected`, invitation acceptance and role-based UI. Mock tests supplement, not replace, an end-to-end preview test of the [backend contract](../backend/api.md). `sessionCache.ts` has unit tests for cache validation and the ok/401/failure transitions; the Playwright journey exercises the real cookie flow ([deployment](deployment.md#end-to-end-tests)).

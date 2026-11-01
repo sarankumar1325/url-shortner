@@ -39,6 +39,8 @@ entrypoint = "main:app"
 - Backend: frozen `uv sync`, `ruff check`, `ruff format --check`, `pytest`.
 - Frontend: frozen `bun install`, `bun test`, `bun run lint`, `bun run build`.
 
+`.github/workflows/e2e.yml` is a separate, manual (`workflow_dispatch`) workflow that runs the Playwright journey against a deployed web app; its `base_url` input defaults to `https://shortlyyy-web.vercel.app`. It creates one `qa-droid-<timestamp>@example.com` account and deletes it at the end. See [frontend deployment](../frontend/deployment.md#end-to-end-tests).
+
 CI uses no production credentials and performs no migrations or deployments. Promotion remains an explicit release step; a green pipeline is not load, restore or availability evidence.
 
 ## Migrations
@@ -49,7 +51,7 @@ Alembic reads `DATABASE_URL_DIRECT` when set, otherwise `DATABASE_URL`, and conn
 (cd backend && uv run alembic current && uv run alembic upgrade head)
 ```
 
-Current production head is `e7b3a9c14d52` (session public IDs, applied 2026-10-25), following the invitation cleanup index and replay-cascade migrations. Never run migrations during function import, request handling or cold start. Use an expand/contract order so the previous backend revision keeps working during promotion; a failed migration needs a tested forward fix or an explicit safe rollback, not a blind downgrade.
+Current production head is `c8e2f5a93b17` (session `persistent` flag and the `retired_short_codes` table), following `b9c4e2f71a83` (link fallback and visit limits) and the earlier session-ID, invitation-index and replay-cascade migrations. `c8e2f5a93b17` is expand-only: the `true` server default keeps inserts from the previous release valid. Never run migrations during function import, request handling or cold start. Use an expand/contract order so the previous backend revision keeps working during promotion; a failed migration needs a tested forward fix or an explicit safe rollback, not a blind downgrade.
 
 ## Function and cron configuration
 
@@ -96,12 +98,12 @@ Settings are unprefixed (`env_file=".env"`), so Vercel receives exactly these na
 | `CRON_SECRET` | Unprefixed platform bearer secret for internal routes |
 | `DRAIN_ON_READ` | `true` on the free plan: bounded 500-event drain before analytics reads |
 | `ANALYTICS_CLAIM_MIN_IDLE_SECONDS`, `ANALYTICS_MAX_ATTEMPTS` | Optional; stale pending messages are reclaimable after 60 seconds and dead-lettered after 5 deliveries |
-| `SESSION_TTL_SECONDS`, `INVITATION_TTL_SECONDS` | Optional; session 30 days and invitation 7 days by default |
+| `SESSION_TTL_SECONDS`, `SHORT_SESSION_TTL_SECONDS`, `INVITATION_TTL_SECONDS` | Optional; persistent session 30 days, non-persistent ("Stay signed in" unchecked) session 24 hours, invitation 7 days by default |
 | `REDIRECT_CACHE_SECONDS`, `REPLAY_TTL_SECONDS`, `RAW_CLICK_RETENTION_DAYS`, `DAILY_RETENTION_DAYS` | Optional bounded defaults (60, 86400, 90, 730) |
 
 Production rejects debug mode and disables interactive docs; this was verified on the deployed host. The OpenAPI document remains publicly reachable by design. Rotating `SECRET_KEY` invalidates existing legacy management tokens and replay ciphertexts but **not** active sessions, because session tokens are random and hashed independently. Rotating it does not invalidate session cookies; use explicit session deletion for that. Introduce versioned legacy keys before rotating in place. Never pass secrets in Vite variables, logs or screenshots.
 
-Session cookies are `HttpOnly`, `SameSite=Lax`, `Path=/`, 30-day `Max-Age`, and `Secure` when `ENVIRONMENT` is `production` or `preview`. The frontend must reach the API through the same-origin `/api` rewrite for the cookie to stay first-party. Credentialed CORS is allowed only for the exact origins in `CORS_ORIGINS`; `allow_credentials=True` with a wildcard is invalid and must never be configured.
+Session cookies are `HttpOnly`, `SameSite=Lax`, `Path=/`, and `Secure` when `ENVIRONMENT` is `production` or `preview`; persistent sessions add a 30-day `Max-Age` that is re-sent on renewal, and non-persistent ones have none. The frontend must reach the API through the same-origin `/api` rewrite for the cookie to stay first-party. Credentialed CORS is allowed only for the exact origins in `CORS_ORIGINS`; `allow_credentials=True` with a wildcard is invalid and must never be configured.
 
 ## Neon: pooling and TLS
 
@@ -199,6 +201,17 @@ Not verified: load/capacity, cold-start latency, region behavior, backup/restore
 6. Authorize production promotion/scheduling separately. Verify both backend hosts, budget alerts, backup restore, takedown/erasure procedure and rollback.
 
 A Vercel code rollback does not undo migrations, data, secrets or a copied preview branch. Keep the previous deployment compatible through expand/contract. Restore only into an isolated DB first, measure RPO/RTO, and choose an explicit recovery action; never blindly downgrade destructive migrations.
+
+## Test account cleanup
+
+E2E runs and manual QA use `qa-droid-…@example.com` accounts. To remove leftovers, run from `backend/` with the target database in `.env`:
+
+```bash
+uv run python -m backend.scripts.delete_accounts --email-like 'qa-droid-%@example.com'        # dry run: lists matches
+uv run python -m backend.scripts.delete_accounts --email-like 'qa-droid-%@example.com' --yes  # deletes them
+```
+
+The pattern is a SQL `LIKE`; it must contain `@` and start with at least three literal characters. Each account goes through the same deletion plan as `DELETE /auth/account` (accounts that own shared workspaces with other members are skipped), codes are retired and redirect caches are invalidated.
 
 ## Local checks from repository root
 

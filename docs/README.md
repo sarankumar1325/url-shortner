@@ -13,7 +13,7 @@ Preserve the agreed stack and product: URL creation with generated/custom codes,
 | Durable state | Neon Postgres, async SQLAlchemy, Alembic | Connection and analytics-storage budgets matter |
 | Cache/limits/buffer | Upstash Redis | Network/command costs; not the durable source of link ownership |
 | Codes | Random 5-character Base62, DB unique constraint and retries | Public identifiers, not authentication secrets; shorter space means more collision retries as volume grows |
-| Accounts | First-party email/password, Argon2id hashes, opaque HttpOnly cookie sessions, password change, session listing/revocation | No email verification, password reset, SSO or MFA in v1 |
+| Accounts | First-party email/password, Argon2id hashes, opaque HttpOnly cookie sessions (30-day renewing with "Stay signed in", otherwise browser-session/24 hours), password change, session listing/revocation, self-service account deletion | No email verification, password reset, SSO or MFA in v1 |
 | Tenancy | Personal workspace at signup plus shared workspaces and invitations | Every link is workspace-scoped; legacy unowned links remain reachable by token |
 | RBAC | Owner > admin > member > viewer, enforced server-side; admins rename, owners delete or transfer ownership | Owner cannot be removed or self-demoted; admins cannot manage peers; personal workspaces cannot be deleted or transferred |
 | Legacy management | Per-link 256-bit token, hash versioning, for unowned links only | Preserves pre-account links; workspace links never return a token |
@@ -29,7 +29,7 @@ No email verification, password reset, SSO/OAuth, MFA, billing, custom user doma
 | Area | Exists now | Not yet implemented |
 | --- | --- | --- |
 | Backend | uv project, FastAPI app factory, async SQLAlchemy models and Alembic migrations, Neon/Upstash clients, RFC 9457 errors, email/password auth with cookie sessions, personal and shared workspaces, invitations, RBAC, password change with session revocation, workspace rename/delete/ownership transfer, idempotent create, redirect, tenant-scoped link management, durable stream analytics with ACK-after-commit/reclaim/dead letters and freshness status, bounded credential/replay/event cleanup, structured request logs, rate limits, 71 tests; auth and trust-recovery releases deployed on Vercel | Durable-stream release deployment, dashboards/alerting, backup automation, minute-level scheduler |
-| Frontend | Login/signup/invite screens, workspace switcher, People and role management, Settings (password, sessions, workspace lifecycle), role-aware create/detail/analytics flows with queue freshness, typed API client, strict TypeScript, Tailwind v4, 116 `bun test` cases; deployed on Vercel | Generated API types, automated a11y/e2e checks |
+| Frontend | Login/signup/invite screens with "Stay signed in", workspace switcher, People and role management, Settings (password, sessions, workspace lifecycle, account deletion), role-aware create/detail/analytics flows with queue freshness, copy fallbacks, paste-to-shorten and keyboard shortcuts, typed API client, strict TypeScript, Tailwind v4, `bun test` unit tests and a Playwright E2E journey (`bun run e2e`, manual `e2e.yml` workflow); deployed on Vercel | Generated API types, automated a11y checks, E2E in push CI |
 | Deployment | Two live Vercel projects on free `.vercel.app` hosts, same-origin `/api` rewrite so the session cookie stays first-party, environment configuration, authenticated daily cron, GitHub Actions CI for tests/lint/build | Custom domains, isolated preview environments |
 | Security/operations | Argon2id passwords, opaque hashed session and invitation tokens, HttpOnly/SameSite=Lax/Secure-in-production cookies, Origin/Referer CSRF checks, exact-origin CORS with credentials, workspace scoping, owner row locks for destructive lifecycle actions, hashed legacy tokens, encrypted replay, safe JSON request logs, rate limits, documented backup/restore runbook | Metrics/dashboards/alerting, tracing, automated backup/restore drill, erasure/takedown workflow, credential rotation |
 
@@ -60,7 +60,7 @@ flowchart LR
 
 ## Critical invariants
 
-1. Unique codes are enforced in Postgres, including deleted rows; aliases are never reused.
+1. Unique codes are enforced in Postgres, including deleted rows; codes from hard-deleted workspaces and accounts are kept in `retired_short_codes`; aliases are never reused.
 2. Account passwords are stored only as Argon2id hashes; session and invitation tokens are stored only as SHA-256 digests in server-side rows.
 3. Session cookies are HttpOnly, SameSite=Lax, Secure in production/preview, and never readable by the SPA. Cookie-authenticated writes reject browser origins outside `CORS_ORIGINS`.
 4. Every workspace link read or write is scoped by membership; RBAC is enforced server-side on each request, not by hiding UI controls.
@@ -110,7 +110,7 @@ Suggested goals (not benchmarks): warm redirect p95 <100 ms, create p95 <400 ms,
 
 **Backend:** [architecture](backend/architecture.md), [API](backend/api.md), [data model](backend/data-model.md), [codes/validation](backend/short-links.md), [cache/capacity](backend/caching-and-scale.md), [analytics](backend/analytics.md), [security](backend/security.md), [observability](backend/observability.md), [deployment](backend/deployment.md).
 
-**Frontend:** [architecture](frontend/architecture.md), [data fetching](frontend/data-fetching.md), [UI/accessibility](frontend/ui-and-a11y.md), [performance](frontend/performance.md), [deployment](frontend/deployment.md).
+**Frontend:** [architecture](frontend/architecture.md), [data fetching](frontend/data-fetching.md), [UI/accessibility](frontend/ui-and-a11y.md), [performance](frontend/performance.md), [deployment](frontend/deployment.md), [end-to-end tests](frontend/deployment.md#end-to-end-tests).
 
 **Decisions:** [two projects](adr/0001-two-vercel-projects.md), [data stack](adr/0002-data-stack.md), [code strategy](adr/0003-short-code-strategy.md), [analytics](adr/0004-async-analytics.md), [anonymous tokens](adr/0005-anonymous-management-tokens.md), [accounts and workspaces](adr/0006-accounts-and-workspaces.md).
 
