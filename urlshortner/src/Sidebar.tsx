@@ -2,7 +2,6 @@ import { useEffect, useRef } from 'react'
 import {
   Activity,
   BarChart3,
-  ChevronsUpDown,
   CircleHelp,
   LayoutGrid,
   Link2,
@@ -17,9 +16,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { Link, NavLink } from 'react-router-dom'
-import type { WorkspaceRole } from './api'
 import { BrandMark } from './AuthPage'
-import { ROLE_LABEL, ROLE_NOTE } from './roles'
 
 type NavItem = { to: string; label: string; icon: LucideIcon; end?: boolean }
 
@@ -40,15 +37,11 @@ type SidebarProps = {
   collapsed: boolean
   narrow: boolean
   drawerOpen: boolean
-  workspaces: { id: string; name: string; role: WorkspaceRole }[]
-  workspaceId: string
-  role: WorkspaceRole
   user: { display_name: string; email: string }
   canEdit: boolean
   onToggleCollapsed: () => void
   onCloseDrawer: () => void
   onNewLink: () => void
-  onSwitchWorkspace: (id: string) => void
   onHelp: () => void
   onSignOut: () => void
 }
@@ -61,28 +54,22 @@ export default function Sidebar({
   collapsed,
   narrow,
   drawerOpen,
-  workspaces,
-  workspaceId,
-  role,
   user,
   canEdit,
   onToggleCollapsed,
   onCloseDrawer,
   onNewLink,
-  onSwitchWorkspace,
   onHelp,
   onSignOut,
 }: SidebarProps) {
   const aside = useRef<HTMLElement>(null)
-  const switcher = useRef<HTMLSelectElement>(null)
   // The drawer always shows full labels; the rail only exists on wide screens.
   const rail = collapsed && !narrow
   const hidden = narrow && !drawerOpen
-  const current = workspaces.find((item) => item.id === workspaceId)
 
   useEffect(() => {
     if (!narrow || !drawerOpen) return
-    aside.current?.querySelector<HTMLElement>('a, button, select')?.focus()
+    aside.current?.querySelector<HTMLElement>('a, button')?.focus()
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === 'Escape') onCloseDrawer()
     }
@@ -155,46 +142,6 @@ export default function Sidebar({
             </button>
           )}
         </div>
-
-        {rail ? (
-          <button
-            type="button"
-            className="workspace-chip"
-            aria-label={`Workspace: ${current?.name ?? ''}. Expand to switch.`}
-            data-tip={current?.name}
-            onClick={() => {
-              onToggleCollapsed()
-              window.requestAnimationFrame(() => switcher.current?.focus())
-            }}
-          >
-            {initial(current?.name ?? '')}
-          </button>
-        ) : (
-          <label className="workspace-switcher">
-            <span className="workspace-avatar" aria-hidden="true">
-              {initial(current?.name ?? '')}
-            </span>
-            <span className="workspace-meta">
-              <select
-                ref={switcher}
-                value={workspaceId}
-                aria-label="Switch workspace"
-                onChange={(event) => onSwitchWorkspace(event.target.value)}
-              >
-                {workspaces.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name} · {ROLE_LABEL[item.role]}
-                  </option>
-                ))}
-              </select>
-              <span className="workspace-role" title={ROLE_NOTE[role]}>
-                {ROLE_LABEL[role]} · {workspaces.length} workspace
-                {workspaces.length === 1 ? '' : 's'}
-              </span>
-            </span>
-            <ChevronsUpDown size={15} aria-hidden="true" />
-          </label>
-        )}
 
         {canEdit && (
           <button

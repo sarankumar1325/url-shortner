@@ -58,7 +58,6 @@ import {
   type ApiProblem,
   type CreateBody,
   type CreatedLink,
-  type WorkspaceRole,
 } from './api'
 import { AuthProvider, useAuth } from './auth'
 import AuthPage, { BrandMark } from './AuthPage'
@@ -1702,14 +1701,6 @@ function WorkspaceShell() {
     void loadAnalytics(record.code)
   }
 
-  function switchWorkspace(id: string) {
-    if (id === workspaceId) return
-    auth.selectWorkspace(id)
-    setLinks([])
-    setDrawerOpen(false)
-    if (!isHome) navigate('/')
-  }
-
   async function signOut() {
     try {
       await auth.logout()
@@ -1786,7 +1777,6 @@ function WorkspaceShell() {
   }
 
   const [, breadcrumb] = routeTitle(location.pathname)
-  const activeRole: WorkspaceRole = role
   const rail = collapsed && !narrow
 
   return (
@@ -1799,15 +1789,11 @@ function WorkspaceShell() {
         collapsed={collapsed}
         narrow={narrow}
         drawerOpen={narrow && drawerOpen}
-        workspaces={auth.session?.workspaces ?? []}
-        workspaceId={workspaceId}
-        role={activeRole}
         user={user}
         canEdit={canEdit}
         onToggleCollapsed={() => setCollapsed((value) => !value)}
         onCloseDrawer={closeDrawer}
         onNewLink={newLink}
-        onSwitchWorkspace={switchWorkspace}
         onHelp={() => setHelp(true)}
         onSignOut={() => void signOut()}
       />
