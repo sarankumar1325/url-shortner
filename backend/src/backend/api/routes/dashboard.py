@@ -17,6 +17,8 @@ async def workspace_dashboard(
 ) -> dict:
     if days not in dashboard.ALLOWED_DAYS:
         raise APIError(422, "validation_error", "days must be 7, 30 or 90.")
+    # A failed drain rolls the session back and expires loaded objects, so read ids first.
+    workspace_id = context.workspace.id
     if get_settings().drain_on_read:
         await analytics.drain_events(session, max_events=analytics.READ_DRAIN_LIMIT)
-    return await dashboard.workspace_dashboard(session, context.workspace.id, days)
+    return await dashboard.workspace_dashboard(session, workspace_id, days)

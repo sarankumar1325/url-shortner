@@ -1,11 +1,16 @@
 """RFC 9457 Problem Details responses."""
 
+import json
+import logging
+
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 MEDIA_TYPE = "application/problem+json"
+ERROR_LOGGER_NAME = "shortly.errors"
+_error_logger = logging.getLogger(ERROR_LOGGER_NAME)
 
 
 def get_request_id(request: Request) -> str:
@@ -108,6 +113,20 @@ async def validation_exception_handler(
 
 
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    route = request.scope.get("route")
+    _error_logger.error(
+        json.dumps(
+            {
+                "event": "unhandled_exception",
+                "request_id": get_request_id(request),
+                "method": request.method,
+                "route": getattr(route, "path", "unmatched"),
+                "exception": type(exc).__name__,
+            },
+            separators=(",", ":"),
+        ),
+        exc_info=exc,
+    )
     return problem_response(
         request,
         500,

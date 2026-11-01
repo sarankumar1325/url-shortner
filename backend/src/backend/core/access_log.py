@@ -9,20 +9,25 @@ from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from backend.core.config import get_settings
-from backend.core.problems import get_request_id
+from backend.core.problems import ERROR_LOGGER_NAME, get_request_id
 
 ACCESS_LOGGER_NAME = "shortly.access"
 _logger = logging.getLogger(ACCESS_LOGGER_NAME)
 
 
 def configure_access_logging() -> None:
-    if _logger.handlers:
+    _configure(_logger, sys.stdout, logging.INFO)
+    _configure(logging.getLogger(ERROR_LOGGER_NAME), sys.stderr, logging.ERROR)
+
+
+def _configure(logger: logging.Logger, stream, level: int) -> None:
+    if logger.handlers:
         return
-    handler = logging.StreamHandler(sys.stdout)
+    handler = logging.StreamHandler(stream)
     handler.setFormatter(logging.Formatter("%(message)s"))
-    _logger.addHandler(handler)
-    _logger.setLevel(logging.INFO)
-    _logger.propagate = False
+    logger.addHandler(handler)
+    logger.setLevel(level)
+    logger.propagate = False
 
 
 class AccessLogMiddleware(BaseHTTPMiddleware):

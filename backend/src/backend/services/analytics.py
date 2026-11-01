@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.config import get_settings
 from backend.core.redis import RedisError, command, pipeline
-from backend.models import Click, ClickDaily, CreateRequest, UserSession, WorkspaceInvitation
+from backend.models import Click, ClickDaily, CreateRequest, Url, UserSession, WorkspaceInvitation
 
 STREAM_KEY = "clicks:stream"
 CONSUMER_GROUP = "analytics"
@@ -284,10 +284,17 @@ async def _read_new(count: int) -> list[tuple[str, dict[str, str]]]:
     return _parse_stream_entries(response)
 
 
+async def _existing_url_ids(session: AsyncSession, url_ids: set[int]) -> set[int]:
+    if not url_ids:
+        return set()
+    result = await session.execute(select(Url.id).where(Url.id.in_(url_ids)))
+    return set(result.scalars().all())
+
+
 async def _process_entries(
     session: AsyncSession, entries: list[tuple[str, dict[str, str]]]
 ) -> dict[str, int]:
-    valid: list[tuple[str, dict]] = []
+    valid: list[tuple[str, dict, str]] = []
     invalid: list[tuple[str, str, str]] = []
     for message_id, fields in entries:
         event = _parse_event(fields)
@@ -295,7 +302,7 @@ async def _process_entries(
         if event is None:
             invalid.append((message_id, "malformed_event", payload))
         else:
-            valid.append((message_id, event))
+            valid.append((message_id, event, payload))
 
     dead_lettered = 0
     if invalid:
@@ -306,12 +313,24 @@ async def _process_entries(
     failed = 0
     if valid:
         try:
-            inserted = await _persist(session, [event for _, event in valid])
+            # A click can outlive its link (hard delete, account deletion); one such
+            # event would otherwise fail the foreign key for the whole batch forever.
+            existing = await _existing_url_ids(session, {int(e["url_id"]) for _, e, _ in valid})
+            orphaned = [
+                (message_id, "link_missing", payload)
+                for message_id, event, payload in valid
+                if int(event["url_id"]) not in existing
+            ]
+            live = [event for _, event, _ in valid if int(event["url_id"]) in existing]
+            if live:
+                inserted = await _persist(session, live)
         except SQLAlchemyError:
             await session.rollback()
             failed = len(valid)
         else:
-            await _acknowledge([message_id for message_id, _ in valid])
+            if orphaned:
+                dead_lettered += await _dead_letter(orphaned)
+            await _acknowledge([message_id for message_id, _, _ in valid])
 
     return {"inserted": inserted, "dead_lettered": dead_lettered, "failed": failed}
 

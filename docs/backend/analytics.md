@@ -84,11 +84,12 @@ Important Upstash detail: the ranged `XPENDING` form takes the count positionall
 For each batch:
 
 1. Parse and validate the envelope (`event_id`, `url_id`, `clicked_at`). Invalid payloads go to `clicks:dead` with reason `malformed_event`.
-2. Insert raw rows with `ON CONFLICT (event_id) DO NOTHING RETURNING url_id, clicked_at, is_bot`.
-3. Aggregate **only the returned rows** by `(url_id, UTC day)`.
-4. Atomically increment daily totals by those deltas and commit raw events and rollups together.
-5. **After** the commit succeeds, pipeline `XACK` and `XDEL` for the batch. On a database failure, roll back and leave the batch pending; it is retried after the idle threshold.
-6. If the acknowledgement itself fails, the committed rows remain and the message is reclaimed later; `event_id` dedup prevents double counts.
+2. Look up which `url_id`s still exist. Events for deleted links go to `clicks:dead` with reason `link_missing` and are acknowledged with the batch, so one orphaned click cannot fail the foreign key for every other event.
+3. Insert raw rows with `ON CONFLICT (event_id) DO NOTHING RETURNING url_id, clicked_at, is_bot`.
+4. Aggregate **only the returned rows** by `(url_id, UTC day)`.
+5. Atomically increment daily totals by those deltas and commit raw events and rollups together.
+6. **After** the commit succeeds, pipeline `XACK` and `XDEL` for the batch. On a database failure, roll back and leave the batch pending; it is retried after the idle threshold.
+7. If the acknowledgement itself fails, the committed rows remain and the message is reclaimed later; `event_id` dedup prevents double counts.
 
 Illustrative single-event SQL (bind parameters, execute within the batch transaction):
 
@@ -117,6 +118,7 @@ The implementation uses SQLAlchemy upserts grouped in the same transaction rathe
 `clicks:dead` entries contain `source_id`, `reason`, a payload preview truncated to 1,000 characters, and `failed_at`. Reasons:
 
 - `malformed_event`: JSON parse or required-field validation failed.
+- `link_missing`: the link was deleted before its click was persisted.
 - `max_attempts_exceeded`: the message was delivered/claimed `ANALYTICS_MAX_ATTEMPTS` times without a successful commit.
 
 Dead letters are diagnostic, not replayable automatically. Inspect with `XRANGE clicks:dead - + COUNT 20`. After fixing a systemic cause, an operator can replay a payload by `XADD`-ing it back to `clicks:stream` (dedup keeps replay safe) and should then acknowledge/delete the dead entry. Never bulk-replay without checking that the underlying issue is resolved.
@@ -178,6 +180,7 @@ Deleting a link cascades its raw events, rollups and replay rows. Analytics read
 | Database failure during persist | Transaction rolls back; batch stays pending and is retried |
 | Commit succeeds, ACK fails | Message is reclaimed; dedup prevents double counts |
 | Malformed stream entry | Moved to `clicks:dead`, then acknowledged |
+| Click for a deleted link | Moved to `clicks:dead` with reason `link_missing`; the rest of the batch persists |
 | Repeated failure (5 attempts) | Moved to `clicks:dead` with reason `max_attempts_exceeded` |
 | Legacy list migration crash | Entry remains in the processing list and is recovered |
 | Missed cron | Drain-on-read provides limited catch-up; freshness is not guaranteed |

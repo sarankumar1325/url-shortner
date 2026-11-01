@@ -112,6 +112,11 @@ def redis(monkeypatch) -> FakeRedis:
     fake = FakeRedis()
     monkeypatch.setattr(analytics, "command", fake.command)
     monkeypatch.setattr(analytics, "pipeline", fake.pipeline)
+
+    async def all_links_exist(session, url_ids):
+        return set(url_ids)
+
+    monkeypatch.setattr(analytics, "_existing_url_ids", all_links_exist)
     return fake
 
 
@@ -382,3 +387,82 @@ async def test_rollups_are_deltaed_from_inserted_rows_only() -> None:
     assert len(session.statements) == 2
     assert session.statements[0].compile().string.find("event_id") >= 0
     assert session.statements[1].table.name == "click_daily"
+
+
+@pytest.mark.asyncio
+async def test_clicks_for_deleted_links_are_dead_lettered_not_retried(
+    redis: FakeRedis, monkeypatch
+) -> None:
+    persisted: list[list[dict]] = []
+
+    async def persist(session, events):
+        persisted.append(events)
+        return len(events)
+
+    async def only_link_7(session, url_ids):
+        return {7} & set(url_ids)
+
+    monkeypatch.setattr(analytics, "_persist", persist)
+    monkeypatch.setattr(analytics, "_existing_url_ids", only_link_7)
+    redis.read_batches = [
+        [
+            [
+                STREAM,
+                [
+                    ["1-0", ["payload", event_payload(url_id=7)]],
+                    ["2-0", ["payload", event_payload(url_id=40)]],
+                ],
+            ]
+        ]
+    ]
+
+    result = await analytics.drain_events(FakeSession(), max_events=10)
+
+    assert result["inserted"] == 1
+    assert result["dead_lettered"] == 1
+    assert result["failed"] == 0
+    assert [event["url_id"] for event in persisted[0]] == [7]
+    dead = [call for call in redis.calls if call[0] == "XADD" and call[1] == DEAD]
+    assert len(dead) == 1
+    assert dead[0][dead[0].index("reason") + 1] == "link_missing"
+    assert dead[0][dead[0].index("source_id") + 1] == "2-0"
+    acked = next(call for call in redis.calls if call[0] == "XACK")
+    assert set(acked[3:]) == {"1-0", "2-0"}
+
+
+@pytest.mark.asyncio
+async def test_batch_with_only_deleted_links_skips_the_insert(
+    redis: FakeRedis, monkeypatch
+) -> None:
+    async def persist(session, events):
+        raise AssertionError("nothing to persist")
+
+    async def no_links(session, url_ids):
+        return set()
+
+    monkeypatch.setattr(analytics, "_persist", persist)
+    monkeypatch.setattr(analytics, "_existing_url_ids", no_links)
+    redis.read_batches = [[[STREAM, [["1-0", ["payload", event_payload(url_id=40)]]]]]]
+
+    result = await analytics.drain_events(FakeSession(), max_events=10)
+
+    assert result["dead_lettered"] == 1
+    assert result["inserted"] == 0
+    assert "XACK" in redis.ops()
+
+
+@pytest.mark.asyncio
+async def test_failed_link_lookup_leaves_messages_pending(redis: FakeRedis, monkeypatch) -> None:
+    async def lookup_fails(session, url_ids):
+        raise SQLAlchemyError("connection lost")
+
+    monkeypatch.setattr(analytics, "_existing_url_ids", lookup_fails)
+    redis.read_batches = [[[STREAM, [["1-0", ["payload", event_payload()]]]]]]
+    session = FakeSession()
+
+    result = await analytics.drain_events(session, max_events=10)
+
+    assert result["failed"] == 1
+    assert session.rollbacks == 1
+    assert "XACK" not in redis.ops()
+    assert not [call for call in redis.calls if call[0] == "XADD" and call[1] == DEAD]

@@ -21,7 +21,7 @@ These targets need load/deployed-region validation. An accepted-event freshness 
 
 ## Safe structured logging
 
-Implemented now: every request emits one JSON line to stdout through the `shortly.access` logger with `event`, `service`, `environment`, validated `request_id`, `method`, matched route template (or `unmatched`), `status`, `duration_ms` and problem `error_code`. Raw paths, query strings, short codes, headers, cookies, tokens, IPs and user agents are never logged. Unhandled exceptions log `status=500` and `error_code=internal_error` before the generic response is produced.
+Implemented now: every request emits one JSON line to stdout through the `shortly.access` logger with `event`, `service`, `environment`, validated `request_id`, `method`, matched route template (or `unmatched`), `status`, `duration_ms` and problem `error_code`. Raw paths, query strings, short codes, headers, cookies, tokens, IPs and user agents are never logged. Unhandled exceptions log `status=500` and `error_code=internal_error` before the generic response is produced. They also write one `unhandled_exception` JSON line (request id, method, route template, exception class) followed by the traceback to stderr through the `shortly.errors` logger.
 
 Not yet implemented: log shipping/retention policy, metrics, tracing, dashboards and alerts. The remaining requirements below are targets, not deployed behavior.
 

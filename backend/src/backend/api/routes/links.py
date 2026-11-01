@@ -385,11 +385,13 @@ async def link_analytics(
 
     from backend.services import analytics as analytics_service
 
+    # A failed drain rolls the session back and expires loaded objects, so read the id first.
+    url_id = url.id
     # Keeps free-plan deployments fresh despite a daily-only cron.
     if get_settings().drain_on_read:
         await analytics_service.drain_events(session, max_events=analytics_service.READ_DRAIN_LIMIT)
 
-    result = await analytics_service.analytics(session, url.id, from_day, to_day)
+    result = await analytics_service.analytics(session, url_id, from_day, to_day)
     return {
         "short_code": code,
         "from": from_day.isoformat(),
