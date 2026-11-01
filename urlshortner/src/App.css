@@ -519,6 +519,7 @@ label {
   font-size: 13px;
 }
 .form-options input[type='date'],
+.password-field input[type='password'],
 .custom-range input[type='date'] {
   width: 100%;
   height: 42px;
@@ -528,6 +529,15 @@ label {
   color: var(--text);
   padding: 0 8px;
   font-size: 13px;
+}
+.password-field .option-check {
+  margin: 0 0 8px;
+}
+.password-row .tag-editor {
+  margin-top: 10px;
+}
+.lock-chip {
+  gap: 3px;
 }
 .composer-bottom {
   display: flex;

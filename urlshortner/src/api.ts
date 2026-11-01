@@ -95,6 +95,7 @@ export type LinkMetadata = {
   fallback_url?: string | null
   max_clicks?: number | null
   clicks_used?: number
+  has_password?: boolean
 }
 
 export type CreatedLink = LinkMetadata & { management_token?: string }
@@ -148,6 +149,7 @@ export type CreateBody = {
   tags?: string[] | null
   fallback_url?: string | null
   max_clicks?: number | null
+  password?: string | null
 }
 
 export type AbuseReason =
@@ -555,11 +557,12 @@ export function createLink(
   signal: AbortSignal,
 ): Promise<CreatedLink> {
   // Older API deployments reject unknown fields, even when they are empty.
-  const { tags, fallback_url, max_clicks, ...otherFields } = body
+  const { tags, fallback_url, max_clicks, password, ...otherFields } = body
   const payload: Record<string, unknown> = { ...otherFields }
   if (tags?.length) payload.tags = tags
   if (fallback_url) payload.fallback_url = fallback_url
   if (max_clicks != null) payload.max_clicks = max_clicks
+  if (password) payload.password = password
   return request<CreatedLink>('/api/v1/links', {
     method: 'POST',
     body: payload,
@@ -589,6 +592,8 @@ export function updateLink(
     tags?: string[] | null
     fallback_url?: string | null
     max_clicks?: number | null
+    /** Omit to keep the current password; null removes it. */
+    password?: string | null
   },
   access: Access,
   signal: AbortSignal,

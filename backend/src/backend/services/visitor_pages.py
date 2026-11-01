@@ -70,7 +70,29 @@ text-decoration:none;font-weight:600;padding:11px 18px;border-radius:999px}
 a.button:focus-visible,a.quiet:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
 a.quiet{color:var(--muted);font-size:14px}
 code{font:inherit;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+form{display:grid;gap:10px;margin:18px 0 8px}
+label{font-weight:600;font-size:14px}
+input{font:inherit;padding:11px 12px;border-radius:10px;border:1px solid var(--line);
+background:var(--bg);color:var(--ink)}
+input:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+button{font:inherit;font-weight:600;border:0;border-radius:999px;padding:11px 18px;
+background:var(--accent);color:var(--accent-ink);cursor:pointer;justify-self:start}
+button:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
+.error{background:var(--warn-bg);color:var(--warn);border-radius:10px;padding:10px 12px;
+font-size:14px}
 """
+
+
+# The unlock form posts to the short link, which then redirects to the
+# destination. Browsers apply form-action to that redirect chain too, so the
+# policy must allow any web destination; the page itself still runs no script.
+PASSWORD_PAGE_HEADERS = {
+    **PAGE_HEADERS,
+    "Content-Security-Policy": (
+        "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; "
+        "form-action 'self' https: http:; frame-ancestors 'none'"
+    ),
+}
 
 
 def _web_base_url() -> str:
@@ -213,3 +235,48 @@ def preview_response(
         f'rel="noreferrer">Continue to {escape(host)}</a>{report}</div>'
     )
     return HTMLResponse(_page(f"Preview {host}", body), headers=PAGE_HEADERS)
+
+
+def password_page(
+    code: str,
+    *,
+    error: str | None = None,
+    status: int = 401,
+    headers: dict[str, str] | None = None,
+) -> HTMLResponse:
+    shown = escape(_display_code(code))
+    alert = (
+        f'<p class="error" id="password-error" role="alert">{escape(error)}</p>' if error else ""
+    )
+    invalid = ' aria-invalid="true" aria-describedby="password-error"' if error else ""
+    report = _report_link(code)
+    body = (
+        "<h1>This link is password protected</h1>"
+        f"<p>Enter the password for <code>{shown}</code>. The person who shared the "
+        "link can give it to you.</p>"
+        f"{alert}"
+        f'<form method="post" action="/{quote(code, safe="")}">'
+        '<label for="password">Password</label>'
+        '<input id="password" name="password" type="password" required maxlength="128" '
+        f'autocomplete="current-password" autofocus{invalid}>'
+        '<button type="submit">Continue</button></form>'
+        f'<div class="actions">{report}</div>'
+    )
+    return HTMLResponse(
+        _page("Password required", body),
+        status_code=status,
+        headers={**PASSWORD_PAGE_HEADERS, **(headers or {})},
+    )
+
+
+def protected_preview_response(code: str) -> HTMLResponse:
+    shown = escape(_display_code(code))
+    report = _report_link(code)
+    body = (
+        "<h1>Before you go</h1>"
+        f"<p>The short link <code>{shown}</code> is password protected, so Shortly does "
+        "not show where it leads until the password is entered.</p>"
+        f'<div class="actions"><a class="button" href="/{quote(code, safe="")}" '
+        f'rel="noreferrer">Enter the password</a>{report}</div>'
+    )
+    return HTMLResponse(_page("Password protected link", body), headers=PAGE_HEADERS)

@@ -25,6 +25,7 @@ import {
   Keyboard,
   Link2,
   LoaderCircle,
+  Lock,
   LogOut,
   Menu,
   Monitor,
@@ -85,6 +86,7 @@ import {
   fieldErrors,
   getLinkStatus,
   limitFieldErrors,
+  linkPasswordError,
   linksCsv,
   normalizeDestination,
   parseTags,
@@ -254,6 +256,9 @@ function CreateForm({
   const [fallback, setFallback] = useState('')
   const [visitLimit, setVisitLimit] = useState('')
   const [limitErrors, setLimitErrors] = useState<LimitErrors>({})
+  const [protect, setProtect] = useState(false)
+  const [password, setPassword] = useState('')
+  const [passwordError, setPasswordError] = useState<string | null>(null)
   const [options, setOptions] = useState(false)
   const [errors, setErrors] = useState<ReturnType<typeof validateDraft>>({})
   const [pasteMessage, setPasteMessage] = useState(
@@ -317,6 +322,11 @@ function CreateForm({
         setLimitErrors(limitProblems)
         setOptions(true)
       }
+      const passwordProblem = error.problem.errors.find((issue) => issue.field === 'password')
+      if (passwordProblem) {
+        setPasswordError(passwordProblem.message)
+        setOptions(true)
+      }
       if (Object.keys(fieldProblems).length > 0) {
         setErrors((current) => ({ ...current, ...fieldProblems }))
         if (fieldProblems.alias || fieldProblems.expiresAt) setOptions(true)
@@ -344,17 +354,20 @@ function CreateForm({
     }
     const limits = validateLimits(fallback, visitLimit)
     const limitProblem = Object.values(limits.errors).some(Boolean)
+    const secret = protect ? linkPasswordError(password) : null
     setErrors(problems)
     setTagError(parsedTags.error)
     setCampaignError(tracked.error)
     setLimitErrors(limits.errors)
+    setPasswordError(secret)
     if (
       Object.values(problems).some(Boolean) ||
       parsedTags.error ||
       tracked.error ||
-      limitProblem
+      limitProblem ||
+      secret
     ) {
-      if (problems.alias || problems.expiresAt || parsedTags.error || limitProblem)
+      if (problems.alias || problems.expiresAt || parsedTags.error || limitProblem || secret)
         setOptions(true)
       if (tracked.error) setCampaignOpen(true)
       window.requestAnimationFrame(() => {
@@ -365,6 +378,8 @@ function CreateForm({
           document
             .getElementById(limits.errors.fallbackUrl ? 'fallback-url' : 'visit-limit')
             ?.focus()
+        else if (!problems.alias && !problems.expiresAt && secret)
+          document.getElementById('link-password')?.focus()
         else
           document
             .getElementById(problems.alias ? 'custom-alias' : 'expires-at')
@@ -379,6 +394,7 @@ function CreateForm({
       tags: parsedTags.tags,
       fallback_url: limits.fallbackUrl,
       max_clicks: limits.maxClicks,
+      password: protect ? password : null,
     }
     void send({ key: crypto.randomUUID(), body })
   }
@@ -809,6 +825,52 @@ function CreateForm({
                   'Comma-separated. Tags help everyone filter this workspace.'}
               </p>
             </div>
+            <div className="password-field">
+              <label className="option-check">
+                <input
+                  type="checkbox"
+                  id="require-password"
+                  checked={protect}
+                  onChange={(event) => {
+                    setProtect(event.target.checked)
+                    setPasswordError(null)
+                    edit()
+                  }}
+                />
+                <span>
+                  Require a password
+                  <small>Visitors enter it before they are redirected.</small>
+                </span>
+              </label>
+              {protect && (
+                <>
+                  <label htmlFor="link-password" className="sr-only">
+                    Link password
+                  </label>
+                  <input
+                    id="link-password"
+                    type="password"
+                    autoComplete="new-password"
+                    value={password}
+                    onChange={(event) => {
+                      setPassword(event.target.value)
+                      edit()
+                      if (passwordError) setPasswordError(null)
+                    }}
+                    placeholder="Link password"
+                    aria-invalid={Boolean(passwordError)}
+                    aria-describedby="link-password-hint"
+                  />
+                  <p
+                    id="link-password-hint"
+                    className={passwordError ? 'field-error' : 'field-hint'}
+                  >
+                    {passwordError ||
+                      '4–128 characters. Share it separately from the link.'}
+                  </p>
+                </>
+              )}
+            </div>
           </div>
         )}
         {problem && (
@@ -917,6 +979,9 @@ function DetailPage({
   const [limitInput, setLimitInput] = useState('')
   const [limitErrors, setLimitErrors] = useState<LimitErrors>({})
   const [busyLimits, setBusyLimits] = useState(false)
+  const [passwordInput, setPasswordInput] = useState('')
+  const [passwordError, setPasswordError] = useState<string | null>(null)
+  const [busyPassword, setBusyPassword] = useState(false)
   const [actionError, setActionError] = useState('')
 
   useEffect(() => {
@@ -1055,6 +1120,42 @@ function DetailPage({
       else setActionError(describeError(failure))
     } finally {
       setBusyLimits(false)
+    }
+  }
+
+  async function savePassword(next: string | null) {
+    if (!link) return
+    const problem = next === null ? null : linkPasswordError(next)
+    setPasswordError(problem)
+    if (problem) return
+    setBusyPassword(true)
+    setActionError('')
+    try {
+      const metadata = await updateLinkRequest(
+        link.code,
+        { password: next },
+        { workspaceId },
+        new AbortController().signal,
+      )
+      const updated = applyMetadata(link, metadata)
+      setLink(updated)
+      setPasswordInput('')
+      onLoaded(updated)
+      notify(
+        next === null
+          ? 'Password removed.'
+          : link.hasPassword
+            ? 'Password changed.'
+            : 'Password set.',
+      )
+    } catch (failure) {
+      const issue = isProblem(failure)
+        ? failure.problem.errors.find((item) => item.field === 'password')
+        : undefined
+      if (issue) setPasswordError(issue.message)
+      else setActionError(describeError(failure))
+    } finally {
+      setBusyPassword(false)
     }
   }
 
@@ -1383,6 +1484,69 @@ function DetailPage({
             {busyLimits ? <LoaderCircle size={14} className="spin" /> : null}
             Save
           </button>
+        </div>
+        <div className="setting-row password-row">
+          <div>
+            <h3>Password</h3>
+            <p>
+              {link.hasPassword
+                ? 'Visitors enter a password before they are redirected.'
+                : 'Anyone with the link can visit it.'}
+            </p>
+            <form
+              className="tag-editor"
+              onSubmit={(event) => {
+                event.preventDefault()
+                void savePassword(passwordInput)
+              }}
+            >
+              <label htmlFor="detail-password" className="sr-only">
+                {link.hasPassword ? 'New password' : 'Password'}
+              </label>
+              <input
+                id="detail-password"
+                type="password"
+                autoComplete="new-password"
+                value={passwordInput}
+                onChange={(event) => {
+                  setPasswordInput(event.target.value)
+                  if (passwordError) setPasswordError(null)
+                }}
+                placeholder={link.hasPassword ? 'New password' : 'Set a password'}
+                disabled={!canEdit || busyPassword}
+                aria-invalid={Boolean(passwordError)}
+                aria-describedby="detail-password-hint"
+              />
+              <button
+                type="submit"
+                className="secondary-button"
+                disabled={!canEdit || busyPassword}
+              >
+                {busyPassword ? <LoaderCircle size={14} className="spin" /> : null}
+                {link.hasPassword ? 'Change password' : 'Set password'}
+              </button>
+              {link.hasPassword && (
+                <button
+                  type="button"
+                  className="text-button"
+                  onClick={() => void savePassword(null)}
+                  disabled={!canEdit || busyPassword}
+                >
+                  Remove
+                </button>
+              )}
+            </form>
+            <p
+              id="detail-password-hint"
+              className={passwordError ? 'field-error' : 'field-hint'}
+            >
+              {passwordError ||
+                (link.hasPassword
+                  ? 'Changing it asks visitors who already unlocked the link to enter the new one.'
+                  : '4–128 characters. Link previews show a locked page without the destination.')}
+            </p>
+          </div>
+          {link.hasPassword && <Lock size={16} aria-hidden="true" />}
         </div>
         <div className="setting-row">
           <div>

@@ -15,9 +15,9 @@ import {
 } from './links'
 
 const TEMPLATE = [
-  'long_url,custom_alias,expires_at,tags,fallback_url,max_clicks',
-  'https://example.com/launch,,,launch,,',
-  'https://example.com/docs,product-docs,2027-01-31,"docs,product",https://example.com/,500',
+  'long_url,custom_alias,expires_at,tags,fallback_url,max_clicks,password',
+  'https://example.com/launch,,,launch,,,',
+  'https://example.com/docs,product-docs,2027-01-31,"docs,product",https://example.com/,500,',
   '',
 ].join('\r\n')
 
@@ -74,6 +74,7 @@ export default function BulkImport({
               tags: row.tags,
               fallback_url: row.fallbackUrl,
               max_clicks: row.maxClicks,
+              password: row.password,
             },
             idempotencyKey,
             workspaceId,
@@ -107,7 +108,8 @@ export default function BulkImport({
         Add up to 50 links at a time. Every row is validated on its own, so one
         bad row never blocks the rest. Columns: <code>long_url</code>,{' '}
         <code>custom_alias</code>, <code>expires_at</code>, <code>tags</code>,{' '}
-        <code>fallback_url</code>, <code>max_clicks</code>.
+        <code>fallback_url</code>, <code>max_clicks</code>,{' '}
+        <code>password</code>.
       </p>
       {finished ? (
         <div className="import-summary" role="status">
@@ -207,6 +209,7 @@ export default function BulkImport({
                     <span className="bulk-destination">
                       {row.destination || '(empty)'}
                       {row.alias && <em>{row.alias}</em>}
+                      {row.password && <span className="tag-chip">Password</span>}
                       {row.tags.length > 0 && (
                         <span className="tag-chip">{row.tags.join(' · ')}</span>
                       )}

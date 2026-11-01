@@ -117,3 +117,37 @@ def decrypt_replay(payload: bytes, associated_data: bytes) -> bytes:
     nonce, ciphertext = payload[:12], payload[12:]
     aesgcm = AESGCM(_replay_key())
     return aesgcm.decrypt(nonce, ciphertext, associated_data)
+
+
+def link_password_fingerprint(password: str) -> str:
+    """Keyed digest for idempotency fingerprints; a plain hash would be guessable."""
+    key = _derive(b"link-password-fingerprint-v1")
+    return hmac.new(key, password.encode(), hashlib.sha256).hexdigest()
+
+
+def link_password_tag(password_hash: str) -> str:
+    """Stands in for the Argon2 hash in the redirect cache and unlock cookies.
+
+    It changes whenever the password does, so old unlock cookies stop working.
+    """
+    key = _derive(b"link-password-tag-v1")
+    return hmac.new(key, password_hash.encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def _unlock_mac(code: str, tag: str, expires: int) -> str:
+    key = _derive(b"link-unlock-cookie-v1")
+    message = f"{code}\x00{tag}\x00{expires}".encode()
+    return hmac.new(key, message, hashlib.sha256).hexdigest()
+
+
+def link_unlock_token(code: str, tag: str, expires: int) -> str:
+    return f"{expires}.{_unlock_mac(code, tag, expires)}"
+
+
+def verify_link_unlock(token: str | None, code: str, tag: str, now: int) -> bool:
+    if not token:
+        return False
+    expires_text, _, mac = token.partition(".")
+    if not expires_text.isdigit() or int(expires_text) <= now:
+        return False
+    return hmac.compare_digest(mac, _unlock_mac(code, tag, int(expires_text)))

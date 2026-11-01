@@ -82,8 +82,8 @@ describe('visit limits', () => {
 
   test('exports limit columns', () => {
     const csv = linksCsv([recordFromMetadata(metadata)])
-    expect(csv.split('\r\n')[0]).toEndWith(',fallback_url,max_clicks,clicks_used')
-    expect(csv.split('\r\n')[1]).toEndWith(',https://example.com/sold-out,3,1')
+    expect(csv.split('\r\n')[0]).toEndWith(',fallback_url,max_clicks,clicks_used,has_password')
+    expect(csv.split('\r\n')[1]).toEndWith(',https://example.com/sold-out,3,1,no')
   })
 })
 

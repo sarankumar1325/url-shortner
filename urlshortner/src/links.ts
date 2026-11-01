@@ -38,6 +38,7 @@ export type LinkRecord = {
   fallbackUrl: string | null
   maxClicks: number | null
   clicksUsed: number
+  hasPassword: boolean
   analytics: Analytics | null
   analyticsLoading: boolean
   analyticsError: string | null
@@ -89,6 +90,7 @@ export function recordFromMetadata(
     fallbackUrl: metadata.fallback_url ?? null,
     maxClicks: metadata.max_clicks ?? null,
     clicksUsed: metadata.clicks_used ?? 0,
+    hasPassword: metadata.has_password ?? false,
     analytics,
     analyticsLoading: false,
     analyticsError: null,
@@ -116,6 +118,7 @@ export function applyMetadata(
       metadata.fallback_url === undefined ? link.fallbackUrl : metadata.fallback_url,
     maxClicks: metadata.max_clicks === undefined ? link.maxClicks : metadata.max_clicks,
     clicksUsed: metadata.clicks_used ?? link.clicksUsed,
+    hasPassword: metadata.has_password ?? link.hasPassword,
     loading: false,
     error: null,
   }
@@ -189,6 +192,18 @@ export function limitFieldErrors(
     if (issue.field === 'max_clicks') mapped.maxClicks = issue.message
   }
   return mapped
+}
+
+export const MIN_LINK_PASSWORD = 4
+export const MAX_LINK_PASSWORD = 128
+
+/** Matches the API: 4–128 characters, counted as code points, never trimmed. */
+export function linkPasswordError(password: string): string | null {
+  const length = [...password].length
+  if (length === 0) return 'Enter a password, or turn off password protection.'
+  if (length < MIN_LINK_PASSWORD || length > MAX_LINK_PASSWORD)
+    return `Use ${MIN_LINK_PASSWORD}–${MAX_LINK_PASSWORD} characters.`
+  return null
 }
 
 export function visitsLabel(link: Pick<LinkRecord, 'maxClicks' | 'clicksUsed'>): string {
@@ -461,6 +476,7 @@ export function linksCsv(links: LinkRecord[]): string {
       'fallback_url',
       'max_clicks',
       'clicks_used',
+      'has_password',
     ],
     ...links.map((link) => [
       link.code,
@@ -474,6 +490,7 @@ export function linksCsv(links: LinkRecord[]): string {
       link.fallbackUrl,
       link.maxClicks,
       link.maxClicks == null ? null : link.clicksUsed,
+      link.hasPassword ? 'yes' : 'no',
     ]),
   ]
   return rows.map((row) => row.map(csvField).join(',')).join('\r\n') + '\r\n'
@@ -542,6 +559,7 @@ export type ImportRow = {
   tagError: string | null
   fallbackUrl: string | null
   maxClicks: number | null
+  password: string | null
   errors: string[]
   valid: boolean
 }
@@ -552,6 +570,7 @@ const EXPIRY_HEADERS = ['expires_at', 'expiry', 'expires']
 const TAGS_HEADERS = ['tags', 'tag', 'labels']
 const FALLBACK_HEADERS = ['fallback_url', 'fallback']
 const LIMIT_HEADERS = ['max_clicks', 'visit_limit', 'max_visits']
+const PASSWORD_HEADERS = ['password']
 
 function headerIndex(
   header: string[],
@@ -578,6 +597,7 @@ export function parseLinkCsv(
   let tagsIndex = 3
   let fallbackIndex = 4
   let limitIndex = 5
+  let passwordIndex = 6
   let data = table
 
   if (hasHeader) {
@@ -592,6 +612,7 @@ export function parseLinkCsv(
     tagsIndex = headerIndex(first, TAGS_HEADERS, -1)
     fallbackIndex = headerIndex(first, FALLBACK_HEADERS, -1)
     limitIndex = headerIndex(first, LIMIT_HEADERS, -1)
+    passwordIndex = headerIndex(first, PASSWORD_HEADERS, -1)
     data = table.slice(1)
   }
 
@@ -616,6 +637,8 @@ export function parseLinkCsv(
     )
     const parsedTags = parseTags(tagInput)
     const limits = validateLimits(cell(fallbackIndex), cell(limitIndex))
+    const password = cell(passwordIndex)
+    const passwordError = password ? linkPasswordError(password) : null
     const errors = [
       fields.destination,
       fields.alias,
@@ -623,6 +646,7 @@ export function parseLinkCsv(
       parsedTags.error,
       limits.errors.fallbackUrl && `Fallback: ${limits.errors.fallbackUrl}`,
       limits.errors.maxClicks,
+      passwordError && `Password: ${passwordError}`,
     ].filter((value): value is string => Boolean(value))
     if (alias && !fields.alias) codes.add(alias)
     return {
@@ -634,6 +658,7 @@ export function parseLinkCsv(
       tagError: parsedTags.error,
       fallbackUrl: limits.fallbackUrl,
       maxClicks: limits.maxClicks,
+      password: password || null,
       errors,
       valid: errors.length === 0,
     }

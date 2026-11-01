@@ -16,8 +16,10 @@ from backend.core.security import (
     decrypt_replay,
     encrypt_replay,
     generate_management_token,
+    generate_password_hash,
     generate_short_code,
     hash_management_token,
+    link_password_fingerprint,
     sha256,
     verify_management_token,
 )
@@ -34,6 +36,8 @@ from backend.services.validation import (
 
 CODE_RETRY_LIMIT = 5
 MAX_CLICKS_LIMIT = 1_000_000
+MIN_LINK_PASSWORD = 4
+MAX_LINK_PASSWORD = 128
 # Link unfurlers that classify_device does not flag; they must not use up a visit.
 PREVIEWER_MARKERS = ("whatsapp", "skypeuripreview", "vkshare")
 
@@ -84,6 +88,20 @@ def _validate_max_clicks(max_clicks: int | None) -> int | None:
     return max_clicks
 
 
+def _validate_password(password: str | None) -> str | None:
+    if password is None:
+        return None
+    if not MIN_LINK_PASSWORD <= len(password) <= MAX_LINK_PASSWORD:
+        message = f"Link passwords must be {MIN_LINK_PASSWORD}–{MAX_LINK_PASSWORD} characters."
+        raise APIError(
+            422,
+            "validation_error",
+            message,
+            errors=[{"field": "password", "code": "out_of_range", "message": message}],
+        )
+    return password
+
+
 def _canonical_request(
     long_url: str,
     custom_alias: str | None,
@@ -91,6 +109,7 @@ def _canonical_request(
     tags: list[str],
     fallback_url: str | None = None,
     max_clicks: int | None = None,
+    password: str | None = None,
 ) -> bytes:
     # Only validated, canonical input is hashed — never raw client bytes.
     body: dict = {
@@ -104,6 +123,9 @@ def _canonical_request(
         body["fallback_url"] = fallback_url
     if max_clicks is not None:
         body["max_clicks"] = max_clicks
+    if password is not None:
+        # Fingerprinted with a server key: replay rows must not reveal it.
+        body["password"] = link_password_fingerprint(password)
     return json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
 
 
@@ -128,6 +150,7 @@ async def _insert_url(
     created_by_user_id: uuid.UUID | None,
     fallback_url: str | None = None,
     max_clicks: int | None = None,
+    password_hash: str | None = None,
 ) -> Url:
     for _ in range(CODE_RETRY_LIMIT):
         code = custom_alias
@@ -152,6 +175,7 @@ async def _insert_url(
                 created_by_user_id=created_by_user_id,
                 fallback_url=fallback_url,
                 max_clicks=max_clicks,
+                password_hash=password_hash,
             )
             .on_conflict_do_nothing(index_elements=["short_code"])
             .returning(Url)
@@ -188,6 +212,7 @@ async def create_link(
     tags: list[str] | None = None,
     fallback_url: str | None = None,
     max_clicks: int | None = None,
+    password: str | None = None,
 ) -> dict:
     """Create a link with atomic idempotency replay storage.
 
@@ -202,6 +227,7 @@ async def create_link(
     expires_at = _validate_expiry(expires_at)
     fallback_url = _validate_fallback(fallback_url)
     max_clicks = _validate_max_clicks(max_clicks)
+    password = _validate_password(password)
     tags = normalize_tags(tags)
     if tags and workspace_id is None:
         raise APIError(
@@ -221,7 +247,9 @@ async def create_link(
     key_hash = sha256(idempotency_key.bytes + scope)
     expires_iso = expires_at.isoformat().replace("+00:00", "Z") if expires_at else None
     request_hash = sha256(
-        _canonical_request(long_url, custom_alias, expires_iso, tags, fallback_url, max_clicks)
+        _canonical_request(
+            long_url, custom_alias, expires_iso, tags, fallback_url, max_clicks, password
+        )
         + scope
     )
 
@@ -292,6 +320,7 @@ async def create_link(
         created_by_user_id,
         fallback_url,
         max_clicks,
+        generate_password_hash(password) if password is not None else None,
     )
     await _insert_tags(session, url.id, tags)
     response = response_builder(url, token, tags=tags)
@@ -430,6 +459,8 @@ async def update_link(
     clear_fallback: bool = False,
     max_clicks: int | None = None,
     clear_max_clicks: bool = False,
+    password: str | None = None,
+    clear_password: bool = False,
 ) -> Url:
     if long_url is not None:
         url.long_url = _validate_destination(long_url)
@@ -443,6 +474,10 @@ async def update_link(
         url.clicks_used = 0
     elif max_clicks is not None:
         url.max_clicks = _validate_max_clicks(max_clicks)
+    if clear_password:
+        url.password_hash = None
+    elif password is not None:
+        url.password_hash = generate_password_hash(_validate_password(password))
     if clear_expiry:
         url.expires_at = None
     elif expires_at is not None:

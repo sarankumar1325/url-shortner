@@ -59,6 +59,7 @@ def _serialize(
         "fallback_url": url.fallback_url,
         "max_clicks": url.max_clicks,
         "clicks_used": url.clicks_used or 0,
+        "has_password": url.password_hash is not None,
     }
     if token is not None:
         body["management_token"] = token
@@ -80,6 +81,7 @@ class CreateLinkRequest(BaseModel):
     tags: list[str] | None = None
     fallback_url: str | None = None
     max_clicks: int | None = None
+    password: str | None = None
 
 
 class UpdateLinkRequest(BaseModel):
@@ -91,6 +93,8 @@ class UpdateLinkRequest(BaseModel):
     tags: list[str] | None = None
     fallback_url: str | None = None
     max_clicks: int | None = None
+    # Omit to keep the current password; null removes it.
+    password: str | None = None
 
 
 @router.post(
@@ -131,6 +135,7 @@ async def create_link(
         tags=payload.tags,
         fallback_url=payload.fallback_url,
         max_clicks=payload.max_clicks,
+        password=payload.password,
     )
     return JSONResponse(
         status_code=201,
@@ -246,6 +251,8 @@ async def get_link(
         url = await links_service.get_workspace_url(session, code, context.workspace.id)
     else:
         url = await links_service.get_public_url(session, code, None)
+        if url.password_hash is not None:
+            raise APIError(401, "password_required", "This link is password protected.")
     tags = await links_service.tags_for_url(session, url.id) if context is not None else []
     return _serialize(url, tags=tags)
 
@@ -287,6 +294,8 @@ async def update_link(
         clear_fallback="fallback_url" in fields and payload.fallback_url is None,
         max_clicks=payload.max_clicks,
         clear_max_clicks="max_clicks" in fields and payload.max_clicks is None,
+        password=payload.password,
+        clear_password="password" in fields and payload.password is None,
     )
     await invalidate_cache(code)
     tags = await links_service.tags_for_url(session, url.id) if context is not None else []

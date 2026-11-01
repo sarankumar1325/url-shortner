@@ -6,6 +6,7 @@ import {
   Download,
   Link2,
   LoaderCircle,
+  Lock,
   Pause,
   Play,
   Search,
@@ -296,6 +297,11 @@ export default function LinkList({
                     ))}
                     {link.tags.length > 2 && (
                       <span className="tag-chip">+{link.tags.length - 2}</span>
+                    )}
+                    {link.hasPassword && (
+                      <span className="tag-chip lock-chip" title="Visitors need a password">
+                        <Lock size={10} aria-hidden="true" /> Password
+                      </span>
                     )}
                     {isExpiringSoon(link) && link.expiresAt && (
                       <span className="expiry-cue" title={`Expires ${new Date(link.expiresAt).toUTCString()}`}>

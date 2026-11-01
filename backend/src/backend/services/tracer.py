@@ -115,13 +115,7 @@ async def trace_redirect(session: AsyncSession, code: str, user_key: str, *, col
                     postgres.update(outcome="not_found", detail=exc.detail)
                     raise
                 timings["postgres"] = _ms(started)
-                loaded = {
-                    "url_id": url.id,
-                    "long_url": url.long_url,
-                    "expires_at": url.expires_at.isoformat() if url.expires_at else None,
-                    "fallback_url": url.fallback_url,
-                    "max_clicks": url.max_clicks,
-                }
+                loaded = redirect.entry_for(url)
                 started = time.perf_counter()
                 if state != "expired":
                     await redirect._cache_set(code, loaded)

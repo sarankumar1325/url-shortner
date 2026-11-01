@@ -98,6 +98,7 @@ def _row(**overrides):
         "expires_at": None,
         "fallback_url": None,
         "max_clicks": None,
+        "password_hash": None,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
