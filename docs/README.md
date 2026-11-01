@@ -51,7 +51,7 @@ flowchart LR
 
 - `backend/` is one Vercel root; `urlshortner/` is the other.
 - The frontend rewrites `/api/:path*` to the backend, so browser requests are same-origin and the `shortly_session` cookie is first-party. The rewrite is a proxy, not a CORS bypass; the backend still checks the browser `Origin` on writes.
-- Deployed hosts: web `https://shortlyyy-web.vercel.app`, short links `https://shortlyyy-go.vercel.app`, API `https://shortlyyy-api.vercel.app` (one project; both hosts redirect, so older `shortlyyy-api` links keep working). All are free `.vercel.app` names, not owned custom domains. The previous `shortly-saran-api`/`shortly-saran-web` projects remain deployed so links created before the move keep redirecting.
+- Deployed hosts: web `https://shortlyyy-web.vercel.app`, short links `https://shortlygo.vercel.app`, API `https://shortlyyy-api.vercel.app` (one project; `shortlyyy-api` and the interim `shortlyyy-go` host also redirect, so older links keep working). All are free `.vercel.app` names, not owned custom domains. The previous `shortly-saran-api`/`shortly-saran-web` projects remain deployed so links created before the move keep redirecting.
 - Example custom origins remain `app.short.example`, `api.short.example`, `short.example`; they are placeholders, not provisioned domains.
 - Local: frontend `http://localhost:5173`, API `http://127.0.0.1:8000`.
 - Previews: exact allowed frontend origin, isolated sanitized Neon data and separate Upstash data/namespace. A copied production database is not safe preview isolation.

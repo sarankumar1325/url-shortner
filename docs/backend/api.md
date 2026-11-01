@@ -281,7 +281,7 @@ Return `201` with `Location: /api/v1/links/sysdesign` and:
 ```json
 {
   "short_code": "sysdesign",
-  "short_url": "https://shortlyyy-go.vercel.app/sysdesign",
+  "short_url": "https://shortlygo.vercel.app/sysdesign",
   "long_url": "https://example.com/articles/system-design?ref=shortener",
   "is_custom_alias": true,
   "is_active": true,
