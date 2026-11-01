@@ -23,9 +23,18 @@ function sessionCookie(setCookie: string | undefined): string | null {
 export async function deleteAccount(baseURL: string, account: TestAccount): Promise<string> {
   const api: APIRequestContext = await request.newContext({ baseURL })
   try {
-    const login = await api.post('/api/v1/auth/login', {
-      data: { email: account.email, password: account.password, remember: false },
-    })
+    const signIn = () =>
+      api.post('/api/v1/auth/login', {
+        data: { email: account.email, password: account.password, remember: false },
+      })
+    let login = await signIn()
+    // A full run uses most of the per-account login limit; wait it out rather
+    // than leave the account behind.
+    for (let attempt = 0; login.status() === 429 && attempt < 2; attempt += 1) {
+      const wait = Number(login.headers()['retry-after'] ?? '60')
+      await new Promise((resolve) => setTimeout(resolve, (Math.min(wait, 70) + 1) * 1000))
+      login = await signIn()
+    }
     if (login.status() === 401) return 'not found (already deleted or never created)'
     if (!login.ok()) return `login failed with ${login.status()}`
     const cookie = sessionCookie(login.headers()['set-cookie'])

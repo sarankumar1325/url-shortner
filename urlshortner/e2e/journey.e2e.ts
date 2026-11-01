@@ -37,6 +37,7 @@ async function restart(context: BrowserContext): Promise<BrowserContext> {
 }
 
 test.afterAll(async ({ baseURL }) => {
+  test.setTimeout(240_000)
   const outcome = await deleteAccount(baseURL ?? 'http://localhost:5173', account)
   console.log(`Cleanup for ${account.email}: ${outcome}`)
 })
