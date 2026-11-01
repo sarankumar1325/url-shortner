@@ -33,6 +33,19 @@ describe('keyboard shortcuts', () => {
     expect(shortcutFor(press('c', { target: { tagName: 'INPUT' } }))).toBeNull()
     expect(shortcutFor(press('n'), true)).toBeNull()
   })
+
+  test('⌘K and Ctrl+K open the palette, even from a text field', () => {
+    expect(shortcutFor(press('k', { metaKey: true }))).toBe('palette')
+    expect(shortcutFor(press('K', { ctrlKey: true }))).toBe('palette')
+    expect(shortcutFor(press('k', { metaKey: true, target: { tagName: 'INPUT' } }))).toBe('palette')
+    expect(shortcutFor(press('k', { ctrlKey: true, target: { tagName: 'DIV', isContentEditable: true } }))).toBe('palette')
+    expect(shortcutFor(press('k'))).toBeNull()
+    expect(shortcutFor(press('k', { metaKey: true, altKey: true }))).toBeNull()
+  })
+
+  test('the palette shortcut waits while another dialog is open', () => {
+    expect(shortcutFor(press('k', { metaKey: true }), true)).toBeNull()
+  })
 })
 
 describe('preview links', () => {

@@ -15,7 +15,9 @@ import {
   ArrowUpRight,
   Check,
   ChevronDown,
+  CircleHelp,
   Copy,
+  Download,
   ExternalLink,
   Eye,
   Flag,
@@ -27,11 +29,14 @@ import {
   Menu,
   Monitor,
   Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
   ShieldCheck,
   SlidersHorizontal,
   Sun,
   Trash2,
+  Upload,
   Users,
   X,
 } from 'lucide-react'
@@ -90,6 +95,8 @@ import {
   type LinkRecord,
 } from './links'
 import { shortcutFor } from './shortcuts'
+import CommandPalette, { type PaletteCommand } from './CommandPalette'
+import { EXPLORE_ITEMS, WORKSPACE_ITEMS } from './navigation'
 import { copyText, fullUrl, pasteIsForPage, urlFromPaste } from './clipboard'
 import { CopyContext } from './copyContext'
 import { useAliasAvailability } from './aliasAvailability'
@@ -1441,6 +1448,7 @@ function WorkspaceShell() {
   const [manualCopy, setManualCopy] = useState<string | null>(null)
   const [pasted, setPasted] = useState<string | undefined>(undefined)
   const [importOpen, setImportOpen] = useState(false)
+  const [paletteOpen, setPaletteOpen] = useState(false)
   const firstRoute = useRef(true)
   const analyticsControllers = useRef(new Map<string, AbortController>())
   const isHome = location.pathname === '/'
@@ -1700,6 +1708,14 @@ function WorkspaceShell() {
     void loadAnalytics(record.code)
   }
 
+  function switchWorkspace(id: string) {
+    if (id === workspaceId) return
+    auth.selectWorkspace(id)
+    setLinks([])
+    setDrawerOpen(false)
+    navigate('/')
+  }
+
   async function signOut() {
     try {
       await auth.logout()
@@ -1722,7 +1738,11 @@ function WorkspaceShell() {
         document.querySelector('dialog[open]') !== null,
       )
       if (action === null) return
-      if (action === 'new-link') {
+      if (action === 'palette') {
+        event.preventDefault()
+        setDrawerOpen(false)
+        setPaletteOpen(true)
+      } else if (action === 'new-link') {
         if (!canEdit) return
         event.preventDefault()
         newLink()
@@ -1777,6 +1797,116 @@ function WorkspaceShell() {
 
   const [, breadcrumb] = routeTitle(location.pathname)
   const rail = collapsed && !narrow
+
+  const paletteCommands: PaletteCommand[] = [
+    ...links.map(
+      (link): PaletteCommand => ({
+        id: `link:${link.code}`,
+        group: 'Links',
+        label: link.shortUrl ? displayShortUrl(link.shortUrl) : link.code,
+        hint: titleFor(link.destination),
+        keywords: [link.code, link.destination, ...link.tags],
+        icon: Link2,
+        run: () => navigate(`/links/${link.code}`),
+      }),
+    ),
+    ...[...WORKSPACE_ITEMS, ...EXPLORE_ITEMS].map(
+      (item): PaletteCommand => ({
+        id: `page:${item.to}`,
+        group: 'Pages',
+        label: item.label,
+        icon: item.icon,
+        run: () => navigate(item.to),
+      }),
+    ),
+    ...(canEdit
+      ? [
+          {
+            id: 'action:new-link',
+            group: 'Actions',
+            label: 'Create a link',
+            hint: 'N',
+            keywords: ['new link', 'shorten'],
+            icon: Plus,
+            run: newLink,
+          },
+          {
+            id: 'action:import',
+            group: 'Actions',
+            label: 'Import links from CSV',
+            keywords: ['upload', 'bulk'],
+            icon: Upload,
+            run: () => {
+              navigate('/links')
+              setImportOpen(true)
+            },
+          },
+        ] satisfies PaletteCommand[]
+      : []),
+    ...(links.length > 0
+      ? [
+          {
+            id: 'action:export',
+            group: 'Actions',
+            label: 'Export links as CSV',
+            keywords: ['download'],
+            icon: Download,
+            run: exportLinks,
+          },
+        ] satisfies PaletteCommand[]
+      : []),
+    {
+      id: 'action:theme',
+      group: 'Actions',
+      label: `Switch to ${theme === 'light' ? 'dark' : 'light'} theme`,
+      keywords: ['theme', 'dark mode', 'light mode', 'appearance'],
+      icon: theme === 'light' ? Moon : Sun,
+      run: () => setTheme(theme === 'light' ? 'dark' : 'light'),
+    },
+    ...(narrow
+      ? []
+      : [
+          {
+            id: 'action:sidebar',
+            group: 'Actions',
+            label: collapsed ? 'Expand sidebar' : 'Collapse sidebar',
+            hint: '[',
+            keywords: ['toggle sidebar', 'navigation'],
+            icon: collapsed ? PanelLeftOpen : PanelLeftClose,
+            run: () => setCollapsed((value) => !value),
+          },
+        ] satisfies PaletteCommand[]),
+    {
+      id: 'action:help',
+      group: 'Actions',
+      label: 'Help and keyboard shortcuts',
+      hint: '?',
+      keywords: ['about', 'shortcuts'],
+      icon: CircleHelp,
+      run: () => setHelp(true),
+    },
+    {
+      id: 'action:sign-out',
+      group: 'Actions',
+      label: 'Sign out',
+      keywords: ['log out'],
+      icon: LogOut,
+      run: () => void signOut(),
+    },
+    ...(auth.session?.workspaces ?? [])
+      .filter((item) => item.id !== workspaceId)
+      .map(
+        (item): PaletteCommand => ({
+          id: `workspace:${item.id}`,
+          group: 'Workspaces',
+          label: item.name,
+          hint: `${item.is_personal ? 'Personal · ' : ''}${item.role}`,
+          keywords: ['switch workspace'],
+          icon: Users,
+          run: () => switchWorkspace(item.id),
+        }),
+      ),
+  ]
 
   return (
     <CopyContext.Provider value={copy}>
@@ -2174,6 +2304,10 @@ function WorkspaceShell() {
             <div>
               <h3>Keyboard shortcuts</h3>
               <p>
+                <kbd>⌘K</kbd> or <kbd>Ctrl+K</kbd> opens the command palette
+                to jump to a link, a page, an action, or another workspace.
+              </p>
+              <p>
                 <kbd>N</kbd> new link · <kbd>/</kbd> search links ·{' '}
                 <kbd>C</kbd> copy the hovered, selected, or open link ·{' '}
                 <kbd>[</kbd> collapse sidebar · <kbd>?</kbd> this help
@@ -2192,6 +2326,12 @@ function WorkspaceShell() {
             Got it <ArrowRight size={16} />
           </button>
         </Modal>
+      )}
+      {paletteOpen && (
+        <CommandPalette
+          commands={paletteCommands}
+          onClose={() => setPaletteOpen(false)}
+        />
       )}
       {importOpen && canEdit && (
         <BulkImport
