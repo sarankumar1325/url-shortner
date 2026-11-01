@@ -209,10 +209,11 @@ async def test_delete_workspace_requires_owner_and_matching_name() -> None:
     owner_id = uuid.uuid4()
     actor = _member(workspace, owner_id, "owner")
 
-    session = _Session([_Result([actor])])
-    await workspace_service.delete_workspace(
+    session = _Session([_Result([actor]), _Result([])])
+    codes = await workspace_service.delete_workspace(
         session, workspace=workspace, actor_id=owner_id, confirm_name=" Studio "
     )
+    assert codes == []
     assert session.deleted == [workspace]
     assert session.committed
 

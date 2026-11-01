@@ -21,8 +21,9 @@ from backend.core.security import (
     sha256,
     verify_management_token,
 )
-from backend.models import ClickDaily, CreateRequest, Url, UrlTag
+from backend.models import ClickDaily, CreateRequest, RetiredShortCode, Url, UrlTag
 from backend.services.analytics import classify_device
+from backend.services.retired_codes import is_retired
 from backend.services.validation import (
     RESERVED_SEGMENTS,
     normalize_tags,
@@ -133,6 +134,10 @@ async def _insert_url(
             code = generate_short_code()
             while code.lower() in RESERVED_SEGMENTS:
                 code = generate_short_code()
+        if await is_retired(session, code):
+            if custom_alias is not None:
+                raise APIError(409, "alias_taken", "That alias is already in use.")
+            continue
         stmt = (
             pg_insert(Url)
             .values(
@@ -496,8 +501,8 @@ async def delete_link(session: AsyncSession, url: Url) -> None:
 async def alias_availability(session: AsyncSession, alias: str) -> dict:
     """Syntax and reserved-word checks first, then a cache probe, then Postgres.
 
-    Soft-deleted codes stay taken: short codes are never reissued, so an old
-    printed link can never start pointing somewhere new.
+    Soft-deleted and retired codes stay taken: short codes are never reissued,
+    so an old printed link can never start pointing somewhere new.
     """
     try:
         validate_custom_alias(alias)
@@ -518,7 +523,9 @@ async def alias_availability(session: AsyncSession, alias: str) -> dict:
             "source": "cache",
         }
 
-    result = await session.execute(select(Url.id).where(Url.short_code == alias).limit(1))
+    in_use = select(Url.short_code).where(Url.short_code == alias)
+    retired = select(RetiredShortCode.short_code).where(RetiredShortCode.short_code == alias)
+    result = await session.execute(in_use.union_all(retired).limit(1))
     if result.scalar_one_or_none() is not None:
         return {
             "alias": alias,

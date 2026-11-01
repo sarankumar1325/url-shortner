@@ -63,6 +63,11 @@ class UserSession(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # "Stay signed in": persistent sessions get a 30-day renewing cookie; the
+    # others get a browser-session cookie and a short server-side lifetime.
+    persistent: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
 
     __table_args__ = (
         CheckConstraint("octet_length(token_hash) = 32"),
@@ -221,6 +226,25 @@ class Url(Base):
         ),
         CheckConstraint("clicks_used >= 0", name="urls_clicks_used_nonnegative"),
         Index("urls_workspace_created_idx", "workspace_id", "created_at"),
+    )
+
+
+class RetiredShortCode(Base):
+    """Codes whose rows were hard-deleted; they are never issued again."""
+
+    __tablename__ = "retired_short_codes"
+
+    short_code: Mapped[str] = mapped_column(String(32), primary_key=True)
+    reason: Mapped[str] = mapped_column(String(24), nullable=False)
+    retired_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "reason IN ('account_deleted','workspace_deleted')",
+            name="retired_reason_domain",
+        ),
     )
 
 

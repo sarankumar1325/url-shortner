@@ -15,8 +15,10 @@ from backend.api.deps import (
     set_session_cookie,
     validate_body_size,
 )
+from backend.api.routes.redirect import invalidate_caches
 from backend.core.problems import APIError
 from backend.models import User
+from backend.services import accounts as accounts_service
 from backend.services import auth as auth_service
 from backend.services import ratelimit
 
@@ -29,6 +31,7 @@ class SignupRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=256)
     display_name: str | None = Field(default=None, max_length=80)
+    remember: bool = True
 
 
 class LoginRequest(BaseModel):
@@ -36,6 +39,15 @@ class LoginRequest(BaseModel):
 
     email: EmailStr
     password: str = Field(min_length=1, max_length=256)
+    # "Stay signed in"; false gives a browser-session cookie and a 24-hour session.
+    remember: bool = True
+
+
+class DeleteAccountRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    password: str = Field(min_length=1, max_length=256)
+    confirm_email: str = Field(min_length=1, max_length=320)
 
 
 class ChangePasswordRequest(BaseModel):
@@ -46,7 +58,11 @@ class ChangePasswordRequest(BaseModel):
 
 
 async def _limit(key: str, limit: int, window_seconds: int = 60) -> None:
-    allowed, retry_after = await ratelimit.check_rate_limit(key, limit, window_seconds)
+    await _limit_all([(key, limit, window_seconds)])
+
+
+async def _limit_all(rules: list[ratelimit.Rule]) -> None:
+    allowed, retry_after = await ratelimit.check_rate_limits(rules)
     if not allowed:
         raise APIError(
             429,
@@ -73,10 +89,11 @@ async def signup(
         email=str(payload.email),
         password=payload.password,
         display_name=payload.display_name,
+        persistent=payload.remember,
     )
     body = await auth_service.session_payload(session, user)
     response = JSONResponse(status_code=201, content=body)
-    set_session_cookie(response, token)
+    set_session_cookie(response, token, payload.remember)
     return response
 
 
@@ -91,12 +108,15 @@ async def login(
     session: AsyncSession = Depends(get_api_session),
 ) -> JSONResponse:
     email = auth_service.normalize_email(str(payload.email))
-    await _limit(f"login-ip:{client_ip(request)}", 30)
-    await _limit(f"login-account:{email}", 10)
-    user, token = await auth_service.login(session, email=email, password=payload.password)
+    await _limit_all(
+        [(f"login-ip:{client_ip(request)}", 30, 60), (f"login-account:{email}", 10, 60)]
+    )
+    user, token = await auth_service.login(
+        session, email=email, password=payload.password, persistent=payload.remember
+    )
     body = await auth_service.session_payload(session, user)
     response = JSONResponse(status_code=200, content=body)
-    set_session_cookie(response, token)
+    set_session_cookie(response, token, payload.remember)
     return response
 
 
@@ -137,6 +157,30 @@ async def change_password(
         current_token=request.cookies.get(SESSION_COOKIE),
     )
     return Response(status_code=204)
+
+
+@router.delete(
+    "/account",
+    status_code=204,
+    summary="Delete the account, its personal workspace and sole-member workspaces",
+    dependencies=[Depends(validate_body_size), Depends(enforce_same_origin)],
+)
+async def delete_account(
+    payload: DeleteAccountRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_api_session),
+) -> Response:
+    await _limit(f"account-delete:{user.id}", 10, 3600)
+    codes = await accounts_service.delete_account(
+        session,
+        user=user,
+        password=payload.password,
+        confirm_email=payload.confirm_email,
+    )
+    await invalidate_caches(codes)
+    response = Response(status_code=204)
+    clear_session_cookie(response)
+    return response
 
 
 @router.get("/sessions", summary="List active sessions")

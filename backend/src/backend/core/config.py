@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     raw_click_retention_days: int = 90
     daily_retention_days: int = 730
     session_ttl_seconds: int = 60 * 60 * 24 * 30
+    # Server-side lifetime of sessions created without "Stay signed in".
+    short_session_ttl_seconds: int = 60 * 60 * 24
     invitation_ttl_seconds: int = 60 * 60 * 24 * 7
     # Vercel Hobby allows only daily cron, so production drains a bounded
     # batch when analytics is read instead of waiting for the daily job.

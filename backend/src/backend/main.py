@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from backend.api.deps import SessionRenewalMiddleware
 from backend.api.router import api_router
 from backend.api.routes import health, internal, redirect
 from backend.core.access_log import AccessLogMiddleware, configure_access_logging
@@ -19,6 +20,7 @@ from backend.core.problems import (
     validation_exception_handler,
 )
 from backend.core.redis import aclose
+from backend.core.timing import ServerTimingMiddleware
 
 
 class RequestIdMiddleware(BaseHTTPMiddleware):
@@ -54,6 +56,8 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(AccessLogMiddleware)
     app.add_middleware(RequestIdMiddleware)
+    app.add_middleware(SessionRenewalMiddleware)
+    app.add_middleware(ServerTimingMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
@@ -73,6 +77,7 @@ def create_app() -> FastAPI:
             "RateLimit-Remaining",
             "RateLimit-Reset",
             "Retry-After",
+            "Server-Timing",
         ],
     )
 

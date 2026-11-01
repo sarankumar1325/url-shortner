@@ -12,6 +12,7 @@ from backend.api.deps import (
     require_user,
     validate_body_size,
 )
+from backend.api.routes.redirect import invalidate_caches
 from backend.core.problems import APIError
 from backend.models import User
 from backend.services import ratelimit
@@ -113,12 +114,13 @@ async def delete_workspace(
     session: AsyncSession = Depends(get_api_session),
 ) -> Response:
     workspace, _ = await _context(session, user, workspace_id)
-    await workspace_service.delete_workspace(
+    codes = await workspace_service.delete_workspace(
         session,
         workspace=workspace,
         actor_id=user.id,
         confirm_name=payload.confirm_name,
     )
+    await invalidate_caches(codes)
     return Response(status_code=204)
 
 

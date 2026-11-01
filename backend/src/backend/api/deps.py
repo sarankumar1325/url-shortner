@@ -4,13 +4,14 @@ from dataclasses import dataclass
 
 from fastapi import Depends, Header, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.datastructures import MutableHeaders
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from backend.core.config import get_settings
 from backend.core.db import get_session_factory
 from backend.core.problems import APIError
 from backend.models import User, Workspace
 from backend.services import auth as auth_service
-from backend.services import workspaces as workspace_service
 
 MAX_BODY_BYTES = 64 * 1024
 SESSION_COOKIE = "shortly_session"
@@ -83,11 +84,12 @@ def _cookie_secure() -> bool:
     return get_settings().environment in ("production", "preview")
 
 
-def set_session_cookie(response: Response, token: str) -> None:
+def set_session_cookie(response: Response, token: str, persistent: bool = True) -> None:
+    """Persistent sessions outlive the browser; the others end when it closes."""
     response.set_cookie(
         SESSION_COOKIE,
         token,
-        max_age=get_settings().session_ttl_seconds,
+        max_age=get_settings().session_ttl_seconds if persistent else None,
         httponly=True,
         secure=_cookie_secure(),
         samesite="lax",
@@ -126,14 +128,59 @@ async def enforce_same_origin(request: Request) -> None:
         raise APIError(403, "csrf_rejected", "Request origin is not allowed.")
 
 
+class SessionRenewalMiddleware:
+    """Re-sends the session cookie with a fresh Max-Age after a renewal.
+
+    Dependencies cannot add headers to a Response a route returns directly, so
+    the lookup leaves the token in request state and the cookie is added here.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_cookie(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                token = (scope.get("state") or {}).get("renewed_session_token")
+                if token and message.get("status", 200) < 400:
+                    cookie = Response()
+                    set_session_cookie(cookie, token)
+                    headers = MutableHeaders(scope=message)
+                    if "set-cookie" not in headers:
+                        headers.append("set-cookie", cookie.headers["set-cookie"])
+            await send(message)
+
+        await self.app(scope, receive, send_with_cookie)
+
+
+async def _session_context(
+    request: Request,
+    session: AsyncSession,
+    workspace_id: uuid.UUID | None = None,
+    *,
+    with_workspace: bool = False,
+) -> auth_service.SessionContext | None:
+    token = request.cookies.get(SESSION_COOKIE)
+    if not token:
+        return None
+    context = await auth_service.session_context(
+        session, token, workspace_id, with_workspace=with_workspace
+    )
+    if context is not None and context.renewed:
+        request.state.renewed_session_token = token
+    return context
+
+
 async def get_optional_user(
     request: Request,
     session: AsyncSession = Depends(get_api_session),
 ) -> User | None:
-    token = request.cookies.get(SESSION_COOKIE)
-    if not token:
-        return None
-    return await auth_service.user_for_session(session, token)
+    context = await _session_context(request, session)
+    return context.user if context else None
 
 
 async def require_user(
@@ -162,30 +209,42 @@ def _workspace_header(
         raise APIError(400, "invalid_workspace", "X-Workspace-Id must be a UUID.") from None
 
 
+async def _workspace_session(
+    request: Request, session: AsyncSession, workspace_id: str | None
+) -> WorkspaceContext | None:
+    """Session, account and membership from one query; None when signed out."""
+    if not request.cookies.get(SESSION_COOKIE):
+        return None
+    context = await _session_context(
+        request, session, _workspace_header(workspace_id), with_workspace=True
+    )
+    if context is None:
+        return None
+    if context.workspace is None or context.role is None:
+        raise APIError(404, "workspace_not_found", "No such workspace.")
+    return WorkspaceContext(workspace=context.workspace, role=context.role, user=context.user)
+
+
 async def get_workspace_context(
-    user: User = Depends(require_user),
+    request: Request,
     session: AsyncSession = Depends(get_api_session),
     workspace_id: str | None = Header(default=None, alias="X-Workspace-Id"),
 ) -> WorkspaceContext:
-    workspace, role = await workspace_service.get_workspace_context(
-        session, user.id, _workspace_header(workspace_id)
-    )
-    return WorkspaceContext(workspace=workspace, role=role, user=user)
+    context = await _workspace_session(request, session, workspace_id)
+    if context is None:
+        raise APIError(401, "authentication_required", "Sign in to continue.")
+    return context
 
 
 async def get_optional_workspace_context(
-    user: User | None = Depends(get_optional_user),
+    request: Request,
     session: AsyncSession = Depends(get_api_session),
     workspace_id: str | None = Header(default=None, alias="X-Workspace-Id"),
 ) -> WorkspaceContext | None:
-    if user is None:
-        if workspace_id is not None:
-            raise APIError(401, "authentication_required", "Sign in to continue.")
-        return None
-    workspace, role = await workspace_service.get_workspace_context(
-        session, user.id, _workspace_header(workspace_id)
-    )
-    return WorkspaceContext(workspace=workspace, role=role, user=user)
+    context = await _workspace_session(request, session, workspace_id)
+    if context is None and workspace_id is not None:
+        raise APIError(401, "authentication_required", "Sign in to continue.")
+    return context
 
 
 SessionDep = Depends(get_api_session)

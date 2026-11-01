@@ -9,7 +9,7 @@ from backend.api.deps import get_api_session
 from backend.core import metrics
 from backend.core.config import get_settings
 from backend.core.problems import APIError
-from backend.core.redis import RedisError, command
+from backend.core.redis import RedisError, command, pipeline
 from backend.core.singleflight import SingleFlight
 from backend.services import analytics as analytics_service
 from backend.services import links as links_service
@@ -61,6 +61,17 @@ async def invalidate_cache(code: str) -> None:
         await command("DEL", f"{CACHE_PREFIX}{code}")
     except RedisError:
         pass
+
+
+async def invalidate_caches(codes: list[str], batch: int = 200) -> None:
+    """Evict many cached redirects in one round trip per batch of keys."""
+    for start in range(0, len(codes), batch):
+        keys = [f"{CACHE_PREFIX}{code}" for code in codes[start : start + batch]]
+        try:
+            await pipeline([["DEL", *keys]])
+        except RedisError:
+            # Entries expire on their own within redirect_cache_seconds.
+            return
 
 
 def fallback_or_gone(entry: dict, code: str, detail: str) -> dict:

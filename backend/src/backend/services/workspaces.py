@@ -15,6 +15,7 @@ from backend.models import (
     WorkspaceInvitation,
     WorkspaceMember,
 )
+from backend.services.retired_codes import retire_workspace_codes
 
 ROLE_RANK = {"viewer": 1, "member": 2, "admin": 3, "owner": 4}
 ASSIGNABLE_ROLES = frozenset({"admin", "member", "viewer"})
@@ -131,7 +132,8 @@ async def delete_workspace(
     workspace: Workspace,
     actor_id: uuid.UUID,
     confirm_name: str,
-) -> None:
+) -> list[str]:
+    """Hard-delete a shared workspace; returns its retired short codes."""
     actor = await _locked_membership(session, workspace.id, actor_id)
     if actor is None:
         raise APIError(404, "workspace_not_found", "No such workspace.")
@@ -151,8 +153,10 @@ async def delete_workspace(
                 }
             ],
         )
+    codes = await retire_workspace_codes(session, [workspace.id], "workspace_deleted")
     await session.delete(workspace)
     await session.commit()
+    return codes
 
 
 async def transfer_ownership(
