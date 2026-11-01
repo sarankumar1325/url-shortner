@@ -2,6 +2,7 @@ import uuid
 from datetime import date, datetime
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -17,7 +18,7 @@ from sqlalchemy import (
     Text,
     func,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -190,6 +191,11 @@ class Url(Base):
     clicks_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     # Argon2id hash; visitors must enter the password before being redirected.
     password_hash: Mapped[str | None] = mapped_column(Text)
+    # [{devices?, countries?, url}]: the first rule that matches a visitor wins.
+    # none_as_null: None must be SQL NULL, not JSON null, or the array check fails.
+    redirect_rules: Mapped[list[dict] | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -227,6 +233,10 @@ class Url(Base):
             name="urls_max_clicks_range",
         ),
         CheckConstraint("clicks_used >= 0", name="urls_clicks_used_nonnegative"),
+        CheckConstraint(
+            "redirect_rules IS NULL OR jsonb_typeof(redirect_rules) = 'array'",
+            name="urls_redirect_rules_array",
+        ),
         Index("urls_workspace_created_idx", "workspace_id", "created_at"),
     )
 

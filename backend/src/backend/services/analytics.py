@@ -71,6 +71,26 @@ def classify_device(user_agent: str | None) -> tuple[str, bool]:
     return "unknown", False
 
 
+def visitor_traits(
+    user_agent: str | None, country: str | None
+) -> tuple[frozenset[str], str | None]:
+    """Device traits (mobile/tablet/desktop plus ios/android) and an ISO country.
+
+    Bots and unrecognized clients have no traits, so device rules never match them.
+    """
+    device, is_bot = classify_device(user_agent)
+    traits: set[str] = set()
+    if not is_bot and device != "unknown":
+        traits.add(device)
+        ua = (user_agent or "").lower()
+        if "iphone" in ua or "ipad" in ua or "ipod" in ua:
+            traits.add("ios")
+        elif "android" in ua:
+            traits.add("android")
+    code = (country or "").strip().upper()
+    return frozenset(traits), code if len(code) == 2 and code.isascii() and code.isalpha() else None
+
+
 def referer_origin(referer: str | None) -> str | None:
     if not referer:
         return None

@@ -66,6 +66,7 @@ import {
   type BulkResponse,
   type CreateBody,
   type CreatedLink,
+  type RedirectRule,
 } from './api'
 import { AuthProvider, useAuth } from './auth'
 import AuthPage, { BrandMark } from './AuthPage'
@@ -76,6 +77,7 @@ import LinkList, { type BulkControls } from './LinkList'
 import { applyBulkResult, bulkSummary, chunk, withRateLimitRetry } from './bulk'
 import Modal from './Modal'
 import BulkImport from './BulkImport'
+import SmartRulesEditor from './SmartRulesEditor'
 import {
   applyMetadata,
   campaignDestination,
@@ -1159,6 +1161,22 @@ function DetailPage({
     }
   }
 
+  async function saveRules(rules: RedirectRule[] | null): Promise<RedirectRule[]> {
+    if (!link) return []
+    setActionError('')
+    const metadata = await updateLinkRequest(
+      link.code,
+      { redirect_rules: rules },
+      { workspaceId },
+      new AbortController().signal,
+    )
+    const updated = applyMetadata(link, metadata)
+    setLink(updated)
+    onLoaded(updated)
+    notify(rules ? 'Smart redirect rules saved.' : 'Smart redirect rules removed.')
+    return updated.redirectRules
+  }
+
   async function remove() {
     if (!link) return
     setBusyDelete(true)
@@ -1484,6 +1502,23 @@ function DetailPage({
             {busyLimits ? <LoaderCircle size={14} className="spin" /> : null}
             Save
           </button>
+        </div>
+        <div className="setting-row rules-row">
+          <div>
+            <h3>Smart redirects</h3>
+            <p>
+              {link.redirectRules.length > 0
+                ? `${link.redirectRules.length} rule${link.redirectRules.length === 1 ? '' : 's'} send some visitors elsewhere by device or country. Everyone else, and chat link previews, get the main destination.`
+                : 'Send visitors to a different page by device or country, such as the right app store.'}
+            </p>
+            <SmartRulesEditor
+              key={link.code}
+              rules={link.redirectRules}
+              canEdit={canEdit}
+              onSave={saveRules}
+              describeError={describeError}
+            />
+          </div>
         </div>
         <div className="setting-row password-row">
           <div>

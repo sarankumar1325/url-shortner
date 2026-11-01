@@ -60,6 +60,7 @@ def _serialize(
         "max_clicks": url.max_clicks,
         "clicks_used": url.clicks_used or 0,
         "has_password": url.password_hash is not None,
+        "redirect_rules": url.redirect_rules or [],
     }
     if token is not None:
         body["management_token"] = token
@@ -72,6 +73,18 @@ def _utc(value: datetime | None) -> datetime | None:
     return value.astimezone(UTC) if value is not None and value.tzinfo else value
 
 
+class RedirectRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    devices: list[str] | None = None
+    countries: list[str] | None = None
+    url: str
+
+
+def _rules(rules: list[RedirectRule] | None) -> list[dict] | None:
+    return [rule.model_dump(exclude_none=True) for rule in rules] if rules else None
+
+
 class CreateLinkRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -82,6 +95,7 @@ class CreateLinkRequest(BaseModel):
     fallback_url: str | None = None
     max_clicks: int | None = None
     password: str | None = None
+    redirect_rules: list[RedirectRule] | None = None
 
 
 class UpdateLinkRequest(BaseModel):
@@ -95,6 +109,8 @@ class UpdateLinkRequest(BaseModel):
     max_clicks: int | None = None
     # Omit to keep the current password; null removes it.
     password: str | None = None
+    # Omit to keep the rules; null or [] removes them all.
+    redirect_rules: list[RedirectRule] | None = None
 
 
 @router.post(
@@ -136,6 +152,7 @@ async def create_link(
         fallback_url=payload.fallback_url,
         max_clicks=payload.max_clicks,
         password=payload.password,
+        redirect_rules=_rules(payload.redirect_rules),
     )
     return JSONResponse(
         status_code=201,
@@ -296,6 +313,8 @@ async def update_link(
         clear_max_clicks="max_clicks" in fields and payload.max_clicks is None,
         password=payload.password,
         clear_password="password" in fields and payload.password is None,
+        redirect_rules=_rules(payload.redirect_rules),
+        replace_redirect_rules="redirect_rules" in fields,
     )
     await invalidate_cache(code)
     tags = await links_service.tags_for_url(session, url.id) if context is not None else []

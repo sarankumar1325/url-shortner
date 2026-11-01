@@ -26,6 +26,7 @@ from backend.core.security import (
 from backend.models import ClickDaily, CreateRequest, RetiredShortCode, Url, UrlTag
 from backend.services.analytics import classify_device
 from backend.services.retired_codes import is_retired
+from backend.services.smart_redirects import validate_rules
 from backend.services.validation import (
     MAX_TAGS,
     RESERVED_SEGMENTS,
@@ -110,6 +111,7 @@ def _canonical_request(
     fallback_url: str | None = None,
     max_clicks: int | None = None,
     password: str | None = None,
+    redirect_rules: list[dict] | None = None,
 ) -> bytes:
     # Only validated, canonical input is hashed — never raw client bytes.
     body: dict = {
@@ -126,6 +128,8 @@ def _canonical_request(
     if password is not None:
         # Fingerprinted with a server key: replay rows must not reveal it.
         body["password"] = link_password_fingerprint(password)
+    if redirect_rules:
+        body["redirect_rules"] = redirect_rules
     return json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
 
 
@@ -151,6 +155,7 @@ async def _insert_url(
     fallback_url: str | None = None,
     max_clicks: int | None = None,
     password_hash: str | None = None,
+    redirect_rules: list[dict] | None = None,
 ) -> Url:
     for _ in range(CODE_RETRY_LIMIT):
         code = custom_alias
@@ -176,6 +181,7 @@ async def _insert_url(
                 fallback_url=fallback_url,
                 max_clicks=max_clicks,
                 password_hash=password_hash,
+                redirect_rules=redirect_rules,
             )
             .on_conflict_do_nothing(index_elements=["short_code"])
             .returning(Url)
@@ -213,6 +219,7 @@ async def create_link(
     fallback_url: str | None = None,
     max_clicks: int | None = None,
     password: str | None = None,
+    redirect_rules: list[dict] | None = None,
 ) -> dict:
     """Create a link with atomic idempotency replay storage.
 
@@ -228,6 +235,7 @@ async def create_link(
     fallback_url = _validate_fallback(fallback_url)
     max_clicks = _validate_max_clicks(max_clicks)
     password = _validate_password(password)
+    redirect_rules = validate_rules(redirect_rules, _validate_destination)
     tags = normalize_tags(tags)
     if tags and workspace_id is None:
         raise APIError(
@@ -248,7 +256,14 @@ async def create_link(
     expires_iso = expires_at.isoformat().replace("+00:00", "Z") if expires_at else None
     request_hash = sha256(
         _canonical_request(
-            long_url, custom_alias, expires_iso, tags, fallback_url, max_clicks, password
+            long_url,
+            custom_alias,
+            expires_iso,
+            tags,
+            fallback_url,
+            max_clicks,
+            password,
+            redirect_rules,
         )
         + scope
     )
@@ -321,6 +336,7 @@ async def create_link(
         fallback_url,
         max_clicks,
         generate_password_hash(password) if password is not None else None,
+        redirect_rules,
     )
     await _insert_tags(session, url.id, tags)
     response = response_builder(url, token, tags=tags)
@@ -461,6 +477,8 @@ async def update_link(
     clear_max_clicks: bool = False,
     password: str | None = None,
     clear_password: bool = False,
+    redirect_rules: list[dict] | None = None,
+    replace_redirect_rules: bool = False,
 ) -> Url:
     if long_url is not None:
         url.long_url = _validate_destination(long_url)
@@ -478,6 +496,8 @@ async def update_link(
         url.password_hash = None
     elif password is not None:
         url.password_hash = generate_password_hash(_validate_password(password))
+    if replace_redirect_rules:
+        url.redirect_rules = validate_rules(redirect_rules, _validate_destination)
     if clear_expiry:
         url.expires_at = None
     elif expires_at is not None:

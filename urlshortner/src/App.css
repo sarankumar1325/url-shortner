@@ -536,8 +536,106 @@ label {
 .password-row .tag-editor {
   margin-top: 10px;
 }
-.lock-chip {
+.icon-chip {
   gap: 3px;
+}
+.rules-row > div {
+  flex: 1;
+  min-width: 0;
+}
+.rule-list {
+  display: grid;
+  gap: 12px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.rule-card {
+  display: grid;
+  gap: 6px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--raised);
+}
+.rule-card > label {
+  margin-top: 6px;
+  font-size: 13px;
+  font-weight: 500;
+}
+.rule-card > label .meta {
+  font-weight: 400;
+}
+.rule-card > input {
+  width: 100%;
+  height: 40px;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+}
+.rule-card .field-hint,
+.rule-card .field-error {
+  margin-top: 0;
+}
+.rule-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+}
+.rule-tools {
+  display: flex;
+  gap: 2px;
+}
+.rule-tools .icon-button {
+  width: 32px;
+  height: 32px;
+}
+.rule-devices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.rule-devices legend {
+  width: 100%;
+  margin-bottom: 6px;
+  font-size: 13px;
+  font-weight: 500;
+}
+.device-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.device-chip:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.device-chip:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.device-chip input {
+  accent-color: var(--accent);
+}
+.rule-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 12px 0 4px;
 }
 .composer-bottom {
   display: flex;

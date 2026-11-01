@@ -81,6 +81,14 @@ export type InvitationPreview = {
   expires_at: string
 }
 
+export type RuleDevice = 'ios' | 'android' | 'mobile' | 'tablet' | 'desktop'
+
+export type RedirectRule = {
+  devices?: RuleDevice[]
+  countries?: string[]
+  url: string
+}
+
 export type LinkMetadata = {
   short_code: string
   short_url: string
@@ -96,6 +104,7 @@ export type LinkMetadata = {
   max_clicks?: number | null
   clicks_used?: number
   has_password?: boolean
+  redirect_rules?: RedirectRule[]
 }
 
 export type CreatedLink = LinkMetadata & { management_token?: string }
@@ -594,6 +603,8 @@ export function updateLink(
     max_clicks?: number | null
     /** Omit to keep the current password; null removes it. */
     password?: string | null
+    /** Omit to keep the rules; null or [] removes them. */
+    redirect_rules?: RedirectRule[] | null
   },
   access: Access,
   signal: AbortSignal,

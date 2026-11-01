@@ -200,6 +200,7 @@ def preview_response(
     *,
     via_fallback: bool = False,
     limited: bool = False,
+    varies: bool = False,
 ) -> HTMLResponse:
     parts = urlsplit(long_url)
     host = (parts.hostname or long_url).removeprefix("www.")
@@ -225,6 +226,11 @@ def preview_response(
         notes = f"<p>This link expires {escape(expiry)}.</p>" if expiry else ""
         if limited:
             notes += "<p>This is a limited-use link. Opening it uses one of its visits.</p>"
+        if varies:
+            notes += (
+                "<p>This link sends visitors to different pages depending on their device "
+                "or country. This is where it takes you.</p>"
+            )
     report = _report_link(code)
     body = (
         f"<h1>Before you go</h1><p>This short link leads to</p>"

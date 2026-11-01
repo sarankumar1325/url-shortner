@@ -22,7 +22,7 @@ from backend.core.singleflight import SingleFlight
 from backend.models import Url
 from backend.services import analytics as analytics_service
 from backend.services import links as links_service
-from backend.services import ratelimit, visitor_pages
+from backend.services import ratelimit, smart_redirects, visitor_pages
 
 router = APIRouter(tags=["redirects"])
 
@@ -118,6 +118,8 @@ def entry_for(url: Url) -> dict:
     if url.password_hash is not None:
         entry["protected"] = True
         entry["password_tag"] = link_password_tag(url.password_hash)
+    if url.redirect_rules:
+        entry["rules"] = url.redirect_rules
     return entry
 
 
@@ -131,7 +133,8 @@ async def _load_entry(code: str, session: AsyncSession) -> dict:
 
 async def resolve_redirect(code: str, session: AsyncSession) -> dict:
     """Positive cache of {url_id, long_url, expires_at, fallback_url, max_clicks}
-    plus {protected, password_tag} for password links.
+    plus {protected, password_tag} for password links and {rules} for smart
+    redirects.
 
     Entries are only written for live links; mutations may take up to the
     cache TTL to land. Concurrent misses for one code share a single Postgres
@@ -185,6 +188,20 @@ async def guard_visit(
     return await apply_visit_limit(entry, code, session, count=count)
 
 
+def destination_for(entry: dict, request: Request) -> str:
+    """Where this visitor goes: the first matching rule, else the main destination.
+
+    Rules only apply while the link is live, and link unfurlers always get the
+    main destination so chat previews stay the same for everyone.
+    """
+    rules = entry.get("rules")
+    user_agent = request.headers.get("user-agent")
+    if not rules or entry.get("via_fallback") or links_service.is_link_previewer(user_agent):
+        return entry["long_url"]
+    matched = smart_redirects.pick(rules, user_agent, request.headers.get("x-vercel-ip-country"))
+    return matched or entry["long_url"]
+
+
 def _wants_html(request: Request) -> bool:
     return "text/html" in request.headers.get("accept", "").lower()
 
@@ -222,10 +239,11 @@ async def preview(
         return visitor_pages.protected_preview_response(code)
     return visitor_pages.preview_response(
         code,
-        entry["long_url"],
+        destination_for(entry, request),
         entry.get("expires_at"),
         via_fallback=bool(entry.get("via_fallback")),
         limited=bool(entry.get("max_clicks")),
+        varies=bool(entry.get("rules")) and not entry.get("via_fallback"),
     )
 
 
@@ -269,7 +287,10 @@ async def redirect(
         user_agent=user_agent,
     )
 
-    return Response(status_code=302, headers={"Location": entry["long_url"], **REDIRECT_HEADERS})
+    return Response(
+        status_code=302,
+        headers={"Location": destination_for(entry, request), **REDIRECT_HEADERS},
+    )
 
 
 @router.head("/{code}", summary="Resolve without recording a click")
@@ -284,7 +305,10 @@ async def redirect_head(
     )
     if entry is None:
         return Response(status_code=401, headers=REDIRECT_HEADERS)
-    return Response(status_code=302, headers={"Location": entry["long_url"], **REDIRECT_HEADERS})
+    return Response(
+        status_code=302,
+        headers={"Location": destination_for(entry, request), **REDIRECT_HEADERS},
+    )
 
 
 async def _submitted_password(request: Request) -> str:

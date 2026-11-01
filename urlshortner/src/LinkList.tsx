@@ -9,6 +9,7 @@ import {
   Lock,
   Pause,
   Play,
+  Route,
   Search,
   Tag,
   Trash2,
@@ -33,6 +34,7 @@ import {
   type LinkSort,
 } from './links'
 import Modal from './Modal'
+import { ruleSummary } from './smartRules'
 
 const FILTERS = ['All links', 'Active', 'Paused', 'Expired', 'Used up'] as const
 
@@ -298,8 +300,16 @@ export default function LinkList({
                     {link.tags.length > 2 && (
                       <span className="tag-chip">+{link.tags.length - 2}</span>
                     )}
+                    {link.redirectRules.length > 0 && (
+                      <span
+                        className="tag-chip icon-chip"
+                        title={link.redirectRules.map(ruleSummary).join('\n')}
+                      >
+                        <Route size={10} aria-hidden="true" /> Smart
+                      </span>
+                    )}
                     {link.hasPassword && (
-                      <span className="tag-chip lock-chip" title="Visitors need a password">
+                      <span className="tag-chip icon-chip" title="Visitors need a password">
                         <Lock size={10} aria-hidden="true" /> Password
                       </span>
                     )}

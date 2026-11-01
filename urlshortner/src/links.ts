@@ -3,6 +3,7 @@ import type {
   Analytics,
   IngestionFreshness,
   LinkMetadata,
+  RedirectRule,
 } from './api'
 
 export const number = new Intl.NumberFormat('en-US')
@@ -39,6 +40,7 @@ export type LinkRecord = {
   maxClicks: number | null
   clicksUsed: number
   hasPassword: boolean
+  redirectRules: RedirectRule[]
   analytics: Analytics | null
   analyticsLoading: boolean
   analyticsError: string | null
@@ -91,6 +93,7 @@ export function recordFromMetadata(
     maxClicks: metadata.max_clicks ?? null,
     clicksUsed: metadata.clicks_used ?? 0,
     hasPassword: metadata.has_password ?? false,
+    redirectRules: metadata.redirect_rules ?? [],
     analytics,
     analyticsLoading: false,
     analyticsError: null,
@@ -119,6 +122,7 @@ export function applyMetadata(
     maxClicks: metadata.max_clicks === undefined ? link.maxClicks : metadata.max_clicks,
     clicksUsed: metadata.clicks_used ?? link.clicksUsed,
     hasPassword: metadata.has_password ?? link.hasPassword,
+    redirectRules: metadata.redirect_rules ?? link.redirectRules,
     loading: false,
     error: null,
   }
@@ -477,6 +481,7 @@ export function linksCsv(links: LinkRecord[]): string {
       'max_clicks',
       'clicks_used',
       'has_password',
+      'smart_rules',
     ],
     ...links.map((link) => [
       link.code,
@@ -491,6 +496,7 @@ export function linksCsv(links: LinkRecord[]): string {
       link.maxClicks,
       link.maxClicks == null ? null : link.clicksUsed,
       link.hasPassword ? 'yes' : 'no',
+      link.redirectRules.length,
     ]),
   ]
   return rows.map((row) => row.map(csvField).join(',')).join('\r\n') + '\r\n'

@@ -43,8 +43,8 @@ describe('link passwords', () => {
 
   test('export a has_password column', () => {
     const csv = linksCsv([recordFromMetadata(metadata)]).split('\r\n')
-    expect(csv[0]).toEndWith(',has_password')
-    expect(csv[1]).toEndWith(',yes')
+    expect(csv[0]).toEndWith(',has_password,smart_rules')
+    expect(csv[1]).toEndWith(',yes,0')
   })
 
   test('send a password only when one is set', async () => {
