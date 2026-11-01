@@ -34,8 +34,8 @@ class _Session:
     [
         ("abc123", "abc123"),
         ("  abc123  ", "abc123"),
-        ("https://shortlyyy.vercel.app/abc123", "abc123"),
-        ("shortlyyy.vercel.app/abc123/", "abc123"),
+        ("https://shortlyyy-go.vercel.app/abc123", "abc123"),
+        ("shortlyyy-go.vercel.app/abc123/", "abc123"),
     ],
 )
 def test_short_code_accepts_codes_and_links(raw: str, expected: str) -> None:

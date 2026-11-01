@@ -155,7 +155,7 @@ export default function ReportPage() {
                         shortCode: undefined,
                       }))
                     }}
-                    placeholder="shortlyyy.vercel.app/abc123"
+                    placeholder="shortlyyy-go.vercel.app/abc123"
                     autoCapitalize="none"
                     spellCheck={false}
                     aria-invalid={Boolean(errors.shortCode)}

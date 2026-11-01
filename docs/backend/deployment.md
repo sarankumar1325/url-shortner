@@ -8,7 +8,8 @@ Two projects in one repository: `backend` (FastAPI), `urlshortner` (static Vite)
 
 The deployed projects use the free Vercel plan with `.vercel.app` hostnames:
 
-- API and redirects: `https://shortlyyy-api.vercel.app`
+- Short links: `https://shortlyyy-go.vercel.app` (the `SHORT_BASE_URL`)
+- API: `https://shortlyyy-api.vercel.app`, the same project, which also still redirects links created before the short host moved
 - Web app: `https://shortlyyy-web.vercel.app`
 
 The earlier `shortly-saran-api` and `shortly-saran-web` projects remain deployed as legacy hosts so links created before the rename continue to redirect. They share the same database but have their own `SHORT_BASE_URL` and CORS settings.
@@ -92,7 +93,8 @@ Settings are unprefixed (`env_file=".env"`), so Vercel receives exactly these na
 | `DATABASE_URL_DIRECT` | Direct Neon URL for migrations only |
 | `UPSTASH_REDIS_REST_URL` | Upstash REST endpoint |
 | `UPSTASH_REDIS_REST_TOKEN` | Upstash REST token; server-side only |
-| `SHORT_BASE_URL` | Trusted public short-link origin (`https://shortlyyy-api.vercel.app`); never derived from Host |
+| `SHORT_BASE_URL` | Trusted public short-link origin (`https://shortlyyy-go.vercel.app`); never derived from Host. It is always rejected as a destination |
+| `BLOCKED_HOSTS` | JSON array of hostnames (and their subdomains) that may never be destinations; production holds `["shortlyyy-api.vercel.app"]`, the earlier short host, so links cannot loop back through it |
 | `CORS_ORIGINS` | JSON array of exact web origins allowed **with credentials**; production holds only `["https://shortlyyy-web.vercel.app"]` |
 | `SECRET_KEY` | Base secret; legacy token pepper and replay-encryption key are derived from it with HKDF. It does not encrypt session tokens |
 | `CRON_SECRET` | Unprefixed platform bearer secret for internal routes |
