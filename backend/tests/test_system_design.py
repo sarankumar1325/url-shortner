@@ -152,9 +152,15 @@ async def _no_session():
 
 @pytest.mark.asyncio
 async def test_system_status_requires_sign_in() -> None:
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get("/api/v1/system/status")
+    # Without the override, resolving the session dependency needs a real
+    # DATABASE_URL, which CI does not have.
+    app.dependency_overrides[deps.get_api_session] = _no_session
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/api/v1/system/status")
+    finally:
+        app.dependency_overrides.pop(deps.get_api_session, None)
 
     assert response.status_code == 401
 
