@@ -207,8 +207,7 @@
   width: 240px;
   height: 38px;
 }
-.explore-page .health-filters select {
-  width: auto;
+.health-filters .select-trigger {
   height: 38px;
 }
 .health-empty {
@@ -349,7 +348,7 @@
   .health-filters .search-field {
     width: 100%;
   }
-  .explore-page .health-filters select {
+  .health-filters .select {
     flex: 1;
   }
   .health-table-wrap {

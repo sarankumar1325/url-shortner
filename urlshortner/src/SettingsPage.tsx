@@ -34,6 +34,7 @@ import {
   type WorkspaceRole,
 } from './api'
 import { useAuth } from './auth'
+import Select from './Select'
 
 const ROLE_LABEL: Record<WorkspaceRole, string> = {
   owner: 'Owner',
@@ -793,28 +794,27 @@ export default function SettingsPage() {
               ) : (
                 <>
                   <label htmlFor="transfer-target">New owner</label>
-                  <select
+                  <Select
                     id="transfer-target"
                     value={targetId}
-                    onChange={(event) => {
-                      setTargetId(event.target.value)
+                    onChange={(value) => {
+                      setTargetId(value)
                       setPendingTransfer(null)
                       setTransferError('')
                       setTransferNotice('')
                     }}
                     disabled={transferBusy || transferable.length === 0}
-                  >
-                    <option value="">
-                      {transferable.length === 0
+                    placeholder={
+                      transferable.length === 0
                         ? 'Invite someone first'
-                        : 'Choose a member'}
-                    </option>
-                    {transferable.map((member) => (
-                      <option key={member.user_id} value={member.user_id}>
-                        {member.display_name} · {ROLE_LABEL[member.role]}
-                      </option>
-                    ))}
-                  </select>
+                        : 'Choose a member'
+                    }
+                    options={transferable.map((member) => ({
+                      value: member.user_id,
+                      label: member.display_name,
+                      hint: `${ROLE_LABEL[member.role]} · ${member.email}`,
+                    }))}
+                  />
                   {transferError && (
                     <p className="field-error" role="alert">
                       {transferError}

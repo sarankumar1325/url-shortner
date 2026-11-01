@@ -14,6 +14,7 @@ import {
   type AbuseReportReceipt,
 } from './api'
 import { BrandMark } from './AuthPage'
+import Select from './Select'
 import { ABUSE_REASONS, validateReport, type ReportFieldErrors } from './links'
 
 function errorText(error: unknown): string {
@@ -172,19 +173,13 @@ export default function ReportPage() {
 
               <div>
                 <label htmlFor="report-reason">What is wrong with it?</label>
-                <select
+                <Select
                   id="report-reason"
+                  className="select-lg"
                   value={reason}
-                  onChange={(event) =>
-                    setReason(event.target.value as AbuseReason)
-                  }
-                >
-                  {ABUSE_REASONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
+                  onChange={setReason}
+                  options={ABUSE_REASONS}
+                />
               </div>
 
               <div>

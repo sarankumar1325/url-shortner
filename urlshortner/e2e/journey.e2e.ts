@@ -205,6 +205,25 @@ test('palette, password links, smart redirects and bulk pause', async ({ page, c
     headers: { 'user-agent': IPHONE, accept: 'application/json' },
   })
   expect(paused.status()).toBe(404)
+
+  await smartRow.getByRole('button', { name: `More actions for ${smartCode}` }).click()
+  const menu = page.getByRole('menu', { name: `More actions for ${smartCode}` })
+  await expect(menu.getByRole('menuitem', { name: 'Resume link' })).toBeVisible()
+  await menu.getByRole('menuitem', { name: 'Delete link…' }).click()
+  const confirm = page.getByRole('dialog', { name: 'Delete this link?' })
+  await confirm.getByRole('button', { name: 'Delete link' }).click()
+  await expect(page.getByText('Deleted 1 link.')).toBeVisible()
+  await expect(smartRow).toHaveCount(0)
+  await expect(lockedRow).toBeVisible()
+  const deleted = await page.request.get(smartUrl, {
+    maxRedirects: 0,
+    headers: { accept: 'application/json' },
+  })
+  expect([404, 410]).toContain(deleted.status())
+
+  await page.getByLabel('Sort').click()
+  await page.getByRole('option', { name: 'Oldest first' }).click()
+  await expect(page.getByLabel('Sort')).toHaveText('Oldest first')
 })
 
 test('signs out, rejects a wrong password, and signs back in', async ({ page }) => {

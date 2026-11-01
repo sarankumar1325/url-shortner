@@ -27,6 +27,7 @@ import {
 import { useAuth } from './auth'
 import { copyText } from './clipboard'
 import { useCopy } from './copyContext'
+import Select, { type SelectOption } from './Select'
 
 const ROLE_LABEL: Record<WorkspaceRole, string> = {
   owner: 'Owner',
@@ -43,6 +44,12 @@ const ROLE_NOTE: Record<WorkspaceRole, string> = {
 }
 
 type AssignableRole = Exclude<WorkspaceRole, 'owner'>
+
+const ROLE_OPTIONS: SelectOption<AssignableRole>[] = [
+  { value: 'viewer', label: 'Viewer', hint: 'Read only' },
+  { value: 'member', label: 'Member', hint: 'Manage links' },
+  { value: 'admin', label: 'Admin', hint: 'Manage people and links' },
+]
 
 function describe(error: unknown): string {
   if (isProblem(error)) {
@@ -302,22 +309,14 @@ export default function MembersPage() {
                     <span>{member.email}</span>
                   </div>
                   {manageable(member) ? (
-                    <select
-                      className="role-select"
-                      value={member.role}
+                    <Select
+                      className="select-sm select-auto role-select"
+                      value={member.role as AssignableRole}
                       aria-label={`Role for ${member.display_name}`}
                       disabled={busyId === member.user_id}
-                      onChange={(event) =>
-                        void changeRole(
-                          member,
-                          event.target.value as AssignableRole,
-                        )
-                      }
-                    >
-                      <option value="viewer">Viewer</option>
-                      <option value="member">Member</option>
-                      <option value="admin">Admin</option>
-                    </select>
+                      onChange={(value) => void changeRole(member, value)}
+                      options={ROLE_OPTIONS}
+                    />
                   ) : (
                     <span className={`role-badge role-${member.role}`}>
                       {member.role === 'owner' && <Crown size={12} />}
@@ -376,17 +375,12 @@ export default function MembersPage() {
                   autoComplete="off"
                 />
                 <label htmlFor="invite-role">Role</label>
-                <select
+                <Select
                   id="invite-role"
                   value={inviteRole}
-                  onChange={(event) =>
-                    setInviteRole(event.target.value as AssignableRole)
-                  }
-                >
-                  <option value="viewer">Viewer · read only</option>
-                  <option value="member">Member · manage links</option>
-                  <option value="admin">Admin · manage people</option>
-                </select>
+                  onChange={setInviteRole}
+                  options={ROLE_OPTIONS}
+                />
                 <button
                   type="submit"
                   className="primary-button"

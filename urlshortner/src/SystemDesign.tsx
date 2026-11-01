@@ -42,6 +42,7 @@ import {
   type LiveSignal,
 } from './concepts'
 import { displayShortUrl, number, titleFor, type LinkRecord } from './links'
+import Select from './Select'
 import {
   cacheOutcome,
   formatMs,
@@ -384,16 +385,17 @@ function Tracer({
         </div>
       </div>
       <div className="tracer-controls">
-        <label className="tracer-select">
-          <span className="sr-only">Link to trace</span>
-          <select value={selected?.code ?? ''} onChange={(event) => setCode(event.target.value)}>
-            {traceable.map((link) => (
-              <option key={link.code} value={link.code}>
-                {displayShortUrl(link.shortUrl) || link.code} → {titleFor(link.destination)}
-              </option>
-            ))}
-          </select>
-        </label>
+        <Select
+          className="tracer-select"
+          aria-label="Link to trace"
+          value={selected?.code ?? ''}
+          onChange={setCode}
+          options={traceable.map((link) => ({
+            value: link.code,
+            label: displayShortUrl(link.shortUrl) || link.code,
+            hint: titleFor(link.destination),
+          }))}
+        />
         <label className="check-row tracer-cold">
           <input type="checkbox" checked={cold} onChange={(event) => setCold(event.target.checked)} />
           <span>

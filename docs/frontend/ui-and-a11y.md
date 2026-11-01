@@ -102,6 +102,13 @@ On the links list (`src/LinkList.tsx`, helpers in `src/bulk.ts`) members get a c
 
 CSV import accepts `long_url,custom_alias,expires_at,tags,fallback_url,max_clicks,password`, creates three rows at a time and waits out `429` responses. CSV export columns end with `fallback_url,max_clicks,clicks_used,has_password,smart_rules`.
 
+### Row actions
+
+Every row in Your links (on Overview and the links page) ends with Copy and a "More actions for <code>" menu (`src/Menu.tsx`): View details, Copy short link, Open destination and, for members and above, Pause or Resume link and Delete link…. Delete asks for confirmation in a dialog, then runs through the bulk endpoint with one code, so the toast reads "Deleted 1 link." The menu follows the ARIA menu button pattern: Enter, Space or the arrow keys open it, arrows wrap, Home and End jump, a letter moves to the next matching item, and Esc or Tab closes it and returns focus to the button.
+
+### Dropdowns
+
+Every choice list in the app (sort, the Dashboard filter and sort, roles, owner transfer, abuse reasons, the QR studio and the tracer) uses `src/Select.tsx` instead of a native `<select>`, so the open list matches the theme. The trigger is a `combobox` button named by its `<label>` or `aria-label`, and the list is a `listbox` whose options can carry a hint line and group headings. Focus stays on the trigger: arrows, Page Up and Page Down, Home and End move the active option, typing jumps to a matching label, Enter or Space picks, and Esc closes without leaving a surrounding dialog. Lists and menus open in the browser's top layer (`popover="manual"`, placement in `src/listbox.ts`), so no panel or dialog clips them; they open below the trigger, or above when there is more room there, and stay inside the viewport.
 ### Smart redirect rules
 
 The detail page's **Smart redirects** section (`src/SmartRulesEditor.tsx`, validation in `src/smartRules.ts`) edits up to 10 rules, each in a numbered card:

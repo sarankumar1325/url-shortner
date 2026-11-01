@@ -2363,7 +2363,7 @@ function WorkspaceShell() {
                       </div>
                     </div>
                   ) : (
-                    <LinkList links={links} overview onCopy={copyLink} />
+                    <LinkList links={links} overview onCopy={copyLink} bulk={bulkControls} />
                   )}
                   <div className="workspace-bottom-note">
                     <ShieldCheck size={16} />

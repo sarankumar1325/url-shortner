@@ -48,7 +48,21 @@ import {
 import { canCopyImages, copyPng, exportQr, saveBlob, type PdfOptions } from './qrExport'
 import { copyText, fullUrl } from './clipboard'
 import { useCopy } from './copyContext'
+import Select, { type SelectOption } from './Select'
 import './explore.css'
+
+const ECC_OPTIONS: SelectOption<QRCodeErrorCorrectionLevel>[] = [
+  { value: 'L', label: 'L · 7% recovery', hint: 'Smallest code' },
+  { value: 'M', label: 'M · 15% recovery', hint: 'Default' },
+  { value: 'Q', label: 'Q · 25% recovery' },
+  { value: 'H', label: 'H · 30% recovery', hint: 'Densest code' },
+]
+
+const PDF_PAGE_OPTIONS: SelectOption<PdfPage>[] = [
+  { value: 'fit', label: 'Fit to code' },
+  { value: 'a4', label: 'A4' },
+  { value: 'letter', label: 'US Letter' },
+]
 
 const PRESETS: { name: string; foreground: string; background: string }[] = [
   { name: 'Ink', foreground: '#222921', background: '#ffffff' },
@@ -454,16 +468,17 @@ export default function QrStudio({
                   </div>
                 ) : (
                   <>
-                    <label htmlFor="qr-link" className="sr-only">
-                      Link
-                    </label>
-                    <select id="qr-link" value={link.code} onChange={(event) => chooseLink(event.target.value)}>
-                      {active.map((item) => (
-                        <option key={item.code} value={item.code}>
-                          {displayShortUrl(item.shortUrl)} → {titleFor(item.destination)}
-                        </option>
-                      ))}
-                    </select>
+                    <Select
+                      id="qr-link"
+                      aria-label="Link"
+                      value={link.code}
+                      onChange={chooseLink}
+                      options={active.map((item) => ({
+                        value: item.code,
+                        label: displayShortUrl(item.shortUrl),
+                        hint: titleFor(item.destination),
+                      }))}
+                    />
                     <label className="check-row">
                       <input type="checkbox" checked={safeScan} onChange={(event) => setSafeScan(event.target.checked)} />
                       <span>
@@ -638,17 +653,13 @@ export default function QrStudio({
                 <label htmlFor="qr-ecc" className="control-label">
                   Error correction
                 </label>
-                <select
+                <Select
                   id="qr-ecc"
                   value={ecc}
                   disabled={forcedEcc}
-                  onChange={(event) => update({ errorCorrection: event.target.value as QRCodeErrorCorrectionLevel })}
-                >
-                  <option value="L">L · 7% recovery, smallest code</option>
-                  <option value="M">M · 15% recovery (default)</option>
-                  <option value="Q">Q · 25% recovery</option>
-                  <option value="H">H · 30% recovery, densest code</option>
-                </select>
+                  onChange={(value) => update({ errorCorrection: value })}
+                  options={ECC_OPTIONS}
+                />
                 {forcedEcc && (
                   <p className="meta">Raised to H because a center mark or artistic style hides part of each module.</p>
                 )}
@@ -725,24 +736,28 @@ export default function QrStudio({
                 </div>
                 {format === 'pdf' ? (
                   <div className="pdf-options">
-                    <label>
-                      <span>Printed size</span>
-                      <select value={pdf.sizeCm} onChange={(event) => setPdf({ ...pdf, sizeCm: Number(event.target.value) })}>
-                        {PDF_SIZES_CM.map((size) => (
-                          <option key={size} value={size}>
-                            {size} cm ({(size / 2.54).toFixed(1)} in)
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>
-                      <span>Page</span>
-                      <select value={pdf.page} onChange={(event) => setPdf({ ...pdf, page: event.target.value as PdfPage })}>
-                        <option value="fit">Fit to code</option>
-                        <option value="a4">A4</option>
-                        <option value="letter">US Letter</option>
-                      </select>
-                    </label>
+                    <div className="pdf-option">
+                      <span id="pdf-size-label">Printed size</span>
+                      <Select
+                        aria-labelledby="pdf-size-label"
+                        value={String(pdf.sizeCm)}
+                        onChange={(value) => setPdf({ ...pdf, sizeCm: Number(value) })}
+                        options={PDF_SIZES_CM.map((size) => ({
+                          value: String(size),
+                          label: `${size} cm`,
+                          hint: `${(size / 2.54).toFixed(1)} in`,
+                        }))}
+                      />
+                    </div>
+                    <div className="pdf-option">
+                      <span id="pdf-page-label">Page</span>
+                      <Select
+                        aria-labelledby="pdf-page-label"
+                        value={pdf.page}
+                        onChange={(page) => setPdf({ ...pdf, page })}
+                        options={PDF_PAGE_OPTIONS}
+                      />
+                    </div>
                     <label className="check-row">
                       <input type="checkbox" checked={pdf.caption} onChange={(event) => setPdf({ ...pdf, caption: event.target.checked })} />
                       <span>Print the short link under the code</span>
@@ -793,16 +808,14 @@ export default function QrStudio({
                   <p className="meta">Every selected link gets this design, zipped into one download.</p>
                 </div>
                 <div className="bulk-actions">
-                  <label className="sr-only" htmlFor="bulk-format">
-                    Bulk format
-                  </label>
-                  <select id="bulk-format" value={bulkFormat} onChange={(event) => setBulkFormat(event.target.value as QrFormat)}>
-                    {FORMATS.map((item) => (
-                      <option key={item.value} value={item.value}>
-                        {item.label}
-                      </option>
-                    ))}
-                  </select>
+                  <Select
+                    id="bulk-format"
+                    className="select-auto"
+                    aria-label="Bulk format"
+                    value={bulkFormat}
+                    onChange={setBulkFormat}
+                    options={FORMATS}
+                  />
                   <button type="button" className="primary-button" disabled={selected.size === 0 || busy !== null} onClick={() => void downloadZip()}>
                     {busy === 'zip' ? <LoaderCircle size={15} className="spin" /> : <FileArchive size={15} />}
                     {busy === 'zip' ? `Zipping ${Math.round(progress * 100)}%` : `Download ZIP (${selected.size})`}

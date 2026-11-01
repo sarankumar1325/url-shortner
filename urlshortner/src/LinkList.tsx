@@ -4,6 +4,7 @@ import {
   ArrowUpRight,
   Copy,
   Download,
+  ExternalLink,
   Link2,
   LoaderCircle,
   Lock,
@@ -16,7 +17,7 @@ import {
   Upload,
   X,
 } from 'lucide-react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import type { BulkAction } from './api'
 import { selectionState, toggleAllVisible, toggleCode, visibleSelection } from './bulk'
 import { fullUrl } from './clipboard'
@@ -33,10 +34,19 @@ import {
   type LinkRecord,
   type LinkSort,
 } from './links'
+import Menu, { type MenuItem } from './Menu'
 import Modal from './Modal'
+import Select, { type SelectOption } from './Select'
 import { ruleSummary } from './smartRules'
 
 const FILTERS = ['All links', 'Active', 'Paused', 'Expired', 'Used up'] as const
+
+const SORT_OPTIONS: SelectOption<LinkSort>[] = [
+  { value: 'newest', label: 'Newest first' },
+  { value: 'oldest', label: 'Oldest first' },
+  { value: 'clicks', label: 'Most clicks · 30d' },
+  { value: 'expiry', label: 'Expiring first' },
+]
 
 export type BulkControls = {
   canEdit: boolean
@@ -72,6 +82,9 @@ export default function LinkList({
   const [tagInput, setTagInput] = useState('')
   const [tagError, setTagError] = useState<string | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [rowDelete, setRowDelete] = useState<LinkRecord | null>(null)
+  const [rowBusy, setRowBusy] = useState<string | null>(null)
+  const navigate = useNavigate()
   // Changing what is shown clears the selection, so an action never reaches
   // links the person can no longer see.
   const setSearch = (value: string) => {
@@ -119,6 +132,66 @@ export default function LinkList({
       setTagInput('')
       setConfirmDelete(false)
     }
+  }
+
+  async function actOnRow(action: BulkAction, link: LinkRecord) {
+    if (!bulk || rowBusy) return
+    setRowBusy(link.code)
+    const done = await bulk.run(action, [link.code])
+    setRowBusy(null)
+    if (done && action === 'delete') {
+      setRowDelete(null)
+      setSelected((current) => {
+        const next = new Set(current)
+        next.delete(link.code)
+        return next
+      })
+    }
+  }
+
+  function rowItems(link: LinkRecord): MenuItem[] {
+    const items: MenuItem[] = [
+      {
+        id: 'view',
+        label: 'View details',
+        icon: ArrowUpRight,
+        onSelect: () => navigate(`/links/${link.code}`),
+      },
+      {
+        id: 'copy',
+        label: 'Copy short link',
+        icon: Copy,
+        disabled: !link.shortUrl,
+        onSelect: () => onCopy(link.shortUrl),
+      },
+      {
+        id: 'open',
+        label: 'Open destination',
+        icon: ExternalLink,
+        disabled: !link.destination,
+        onSelect: () => window.open(link.destination, '_blank', 'noopener,noreferrer'),
+      },
+    ]
+    if (bulk?.canEdit) {
+      items.push(
+        {
+          id: 'toggle',
+          label: link.active ? 'Pause link' : 'Resume link',
+          icon: link.active ? Pause : Play,
+          disabled: link.loading,
+          separated: true,
+          onSelect: () => void actOnRow(link.active ? 'pause' : 'resume', link),
+        },
+        {
+          id: 'delete',
+          label: 'Delete link…',
+          icon: Trash2,
+          danger: true,
+          onSelect: () => setRowDelete(link),
+        },
+      )
+    }
+    return items
   }
 
   function submitTags(event: FormEvent<HTMLFormElement>) {
@@ -201,12 +274,13 @@ export default function LinkList({
           {!overview && (
             <div className="sort-field">
               <label htmlFor="link-sort">Sort</label>
-              <select id="link-sort" value={sort} onChange={(event) => setSort(event.target.value as LinkSort)}>
-                <option value="newest">Newest first</option>
-                <option value="oldest">Oldest first</option>
-                <option value="clicks">Most clicks · 30d</option>
-                <option value="expiry">Expiring first</option>
-              </select>
+              <Select
+                id="link-sort"
+                className="select-sm select-auto"
+                value={sort}
+                onChange={setSort}
+                options={SORT_OPTIONS}
+              />
             </div>
           )}
         </div>
@@ -369,13 +443,11 @@ export default function LinkList({
                 >
                   <Copy size={16} />
                 </button>
-                <Link
-                  className="icon-button"
-                  aria-label={`View ${link.code}`}
-                  to={`/links/${link.code}`}
-                >
-                  <ArrowUpRight size={18} />
-                </Link>
+                <Menu
+                  label={`More actions for ${link.code}`}
+                  items={rowItems(link)}
+                  busy={rowBusy === link.code}
+                />
               </div>
             </div>
           )
@@ -519,6 +591,29 @@ export default function LinkList({
             </form>
           )}
         </div>
+      )}
+      {rowDelete && (
+        <Modal title="Delete this link?" onClose={() => setRowDelete(null)}>
+          <p>
+            <strong>{rowDelete.shortUrl ? displayShortUrl(rowDelete.shortUrl) : rowDelete.code}</strong>{' '}
+            stops redirecting right away and its short code is never reused.
+            This cannot be undone.
+          </p>
+          <div className="dialog-actions">
+            <button type="button" className="secondary-button" onClick={() => setRowDelete(null)}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="danger-button filled"
+              disabled={rowBusy !== null}
+              onClick={() => void actOnRow('delete', rowDelete)}
+            >
+              {rowBusy === rowDelete.code ? <LoaderCircle size={14} className="spin" /> : <Trash2 size={14} />}
+              Delete link
+            </button>
+          </div>
+        </Modal>
       )}
       {confirmDelete && (
         <Modal

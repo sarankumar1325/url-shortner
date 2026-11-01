@@ -32,8 +32,27 @@ import {
   type HealthSort,
 } from './linkHealth'
 import { displayShortUrl, number, queueLabel, titleFor } from './links'
+import Select, { type SelectOption } from './Select'
 import './explore.css'
 import './dashboard.css'
+
+const HEALTH_FILTER_OPTIONS: SelectOption<HealthFilter>[] = [
+  { value: 'all', label: 'All links' },
+  { value: 'attention', label: 'Needs attention' },
+  ...(['active', 'paused', 'expired', 'used_up', 'blocked'] as const).map((status) => ({
+    value: status,
+    label: STATUS_LABEL[status],
+    group: 'Status',
+  })),
+  ...WATCH_ISSUES.map((issue) => ({ value: issue, label: ISSUE_LABEL[issue], group: 'Issue' })),
+]
+
+const HEALTH_SORT_OPTIONS: SelectOption<HealthSort>[] = [
+  { value: 'clicks', label: 'Most clicks' },
+  { value: 'change', label: 'Biggest change' },
+  { value: 'last_click', label: 'Last clicked' },
+  { value: 'newest', label: 'Newest' },
+]
 
 type Period = 7 | 30 | 90
 
@@ -328,32 +347,22 @@ export default function Dashboard({
                 onChange={(event) => setQuery(event.target.value)}
               />
             </label>
-            <label className="sr-only" htmlFor="health-filter">
-              Filter
-            </label>
-            <select id="health-filter" value={filter} onChange={(e) => setFilter(e.target.value as HealthFilter)}>
-              <option value="all">All links</option>
-              <option value="attention">Needs attention</option>
-              {(['active', 'paused', 'expired', 'used_up', 'blocked'] as const).map((status) => (
-                <option key={status} value={status}>
-                  {STATUS_LABEL[status]}
-                </option>
-              ))}
-              {WATCH_ISSUES.map((issue) => (
-                <option key={issue} value={issue}>
-                  {ISSUE_LABEL[issue]}
-                </option>
-              ))}
-            </select>
-            <label className="sr-only" htmlFor="health-sort">
-              Sort
-            </label>
-            <select id="health-sort" value={sort} onChange={(e) => setSort(e.target.value as HealthSort)}>
-              <option value="clicks">Most clicks</option>
-              <option value="change">Biggest change</option>
-              <option value="last_click">Last clicked</option>
-              <option value="newest">Newest</option>
-            </select>
+            <Select
+              id="health-filter"
+              className="select-auto"
+              aria-label="Filter"
+              value={filter}
+              onChange={setFilter}
+              options={HEALTH_FILTER_OPTIONS}
+            />
+            <Select
+              id="health-sort"
+              className="select-auto"
+              aria-label="Sort"
+              value={sort}
+              onChange={setSort}
+              options={HEALTH_SORT_OPTIONS}
+            />
           </div>
         </div>
         {rows.length === 0 ? (
