@@ -46,6 +46,8 @@ import {
   type QrFormat,
 } from './qr'
 import { canCopyImages, copyPng, exportQr, saveBlob, type PdfOptions } from './qrExport'
+import { copyText, fullUrl } from './clipboard'
+import { useCopy } from './copyContext'
 import './explore.css'
 
 const PRESETS: { name: string; foreground: string; background: string }[] = [
@@ -178,6 +180,7 @@ export default function QrStudio({
   workspaceName: string
   notify: (message: string) => void
 }) {
+  const copyValue = useCopy()
   const [params, setParams] = useSearchParams()
   const requested = params.get('code')
   const [design, setDesign] = useState<QrDesign>(DEFAULT_DESIGN)
@@ -305,10 +308,20 @@ export default function QrStudio({
     if (!encoded) return
     setBusy(`copy-${kind}`)
     try {
-      if (kind === 'image') await copyPng(encoded, design, pixels)
-      else if (kind === 'svg') await navigator.clipboard.writeText(qrSvg(encoded, design, pixels))
-      else if (kind === 'text') await navigator.clipboard.writeText(qrText(encoded, design))
-      else await navigator.clipboard.writeText(encoded)
+      if (kind !== 'image') {
+        const value =
+          kind === 'svg'
+            ? qrSvg(encoded, design, pixels)
+            : kind === 'text'
+              ? qrText(encoded, design)
+              : target?.isLink
+                ? fullUrl(encoded)
+                : encoded
+        if ((await copyText(value)) === 'manual') {
+          await copyValue(value)
+          return
+        }
+      } else await copyPng(encoded, design, pixels)
       notify(
         kind === 'image'
           ? 'QR image copied. Paste it into any app.'

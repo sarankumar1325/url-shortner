@@ -10,6 +10,7 @@ import {
   X,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
+import { fullUrl } from './clipboard'
 import {
   displayShortUrl,
   getLinkStatus,
@@ -169,7 +170,12 @@ export default function LinkList({
           const total = linkClicks(link)
           const subtitle = titleFor(link.destination)
           return (
-            <div className="link-row link-grid" role="row" key={link.code}>
+            <div
+              className="link-row link-grid"
+              role="row"
+              key={link.code}
+              data-copy-url={link.shortUrl ? fullUrl(link.shortUrl) : undefined}
+            >
               <div className="link-identity" role="cell">
                 <Link2 size={18} aria-hidden="true" strokeWidth={1.5} />
                 <div>

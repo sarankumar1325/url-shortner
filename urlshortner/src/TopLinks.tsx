@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
-import { Database, Trophy, Zap } from 'lucide-react'
+import { Copy, Database, Trophy, Zap } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { getTopLinks, isProblem, type TopLinks as TopLinksData } from './api'
+import { fullUrl } from './clipboard'
+import { useCopy } from './copyContext'
 import { displayShortUrl, titleFor } from './links'
 
 type Days = 1 | 7 | 30
@@ -12,6 +14,7 @@ const RANGES: { value: Days; label: string }[] = [
 ]
 
 export default function TopLinks({ workspaceId }: { workspaceId: string }) {
+  const copy = useCopy()
   const [days, setDays] = useState<Days>(7)
   const [state, setState] = useState<{
     key: string
@@ -75,7 +78,7 @@ export default function TopLinks({ workspaceId }: { workspaceId: string }) {
       ) : (
         <ol className="top-list">
           {links.map((item, index) => (
-            <li key={item.short_code}>
+            <li key={item.short_code} data-copy-url={fullUrl(item.short_url)}>
               <span className="top-rank numeric">{index + 1}</span>
               <Link to={`/links/${encodeURIComponent(item.short_code)}`} className="top-link">
                 <strong>{displayShortUrl(item.short_url)}</strong>
@@ -88,6 +91,15 @@ export default function TopLinks({ workspaceId }: { workspaceId: string }) {
                 {item.clicks.toLocaleString()}
                 <span className="sr-only"> clicks</span>
               </span>
+              <button
+                type="button"
+                className="icon-button top-copy"
+                aria-label={`Copy short link for ${item.short_code}`}
+                title="Copy link"
+                onClick={() => void copy(fullUrl(item.short_url), 'Link copied to clipboard.')}
+              >
+                <Copy size={15} />
+              </button>
             </li>
           ))}
         </ol>

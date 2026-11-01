@@ -1,4 +1,4 @@
-export type Shortcut = 'new-link' | 'search' | 'help' | 'toggle-sidebar'
+export type Shortcut = 'new-link' | 'search' | 'help' | 'toggle-sidebar' | 'copy'
 
 export type ShortcutEvent = {
   key: string
@@ -21,5 +21,6 @@ export function shortcutFor(event: ShortcutEvent, dialogOpen = false): Shortcut 
   if (event.key === '/') return 'search'
   if (event.key === '?') return 'help'
   if (event.key === '[') return 'toggle-sidebar'
+  if (event.key === 'c' || event.key === 'C') return 'copy'
   return null
 }

@@ -25,6 +25,8 @@ import {
   type WorkspaceRole,
 } from './api'
 import { useAuth } from './auth'
+import { copyText } from './clipboard'
+import { useCopy } from './copyContext'
 
 const ROLE_LABEL: Record<WorkspaceRole, string> = {
   owner: 'Owner',
@@ -72,6 +74,7 @@ export default function MembersPage() {
   const [workspaceName, setWorkspaceName] = useState('')
   const [creating, setCreating] = useState(false)
   const [notice, setNotice] = useState('')
+  const copyValue = useCopy()
 
   const load = useCallback(
     async (signal: AbortSignal) => {
@@ -220,12 +223,9 @@ export default function MembersPage() {
   }
 
   async function copy(value: string) {
-    try {
-      await navigator.clipboard.writeText(value)
-      setNotice('Invitation link copied.')
-    } catch {
-      window.prompt('Copy this invitation link', value)
-    }
+    const outcome = await copyText(value)
+    if (outcome === 'manual') await copyValue(value)
+    else setNotice('Invitation link copied.')
   }
 
   async function createWorkspace(event: FormEvent<HTMLFormElement>) {

@@ -92,6 +92,8 @@ import {
   type LinkRecord,
 } from './links'
 import { shortcutFor } from './shortcuts'
+import { copyText, fullUrl, pasteIsForPage, urlFromPaste } from './clipboard'
+import { CopyContext } from './copyContext'
 import { useAliasAvailability } from './aliasAvailability'
 import TopLinks from './TopLinks'
 import Sidebar from './Sidebar'
@@ -191,14 +193,17 @@ function CreateForm({
   links,
   onCreate,
   onCopy,
+  pasted,
 }: {
   workspaceId: string
   workspaceName: string
   links: LinkRecord[]
   onCreate: (link: CreatedLink) => void
   onCopy: (text: string) => void
+  /** A URL pasted outside any field; prefilled and ready to submit. */
+  pasted?: string
 }) {
-  const [destination, setDestination] = useState('')
+  const [destination, setDestination] = useState(pasted ?? '')
   const [alias, setAlias] = useState('')
   const aliasState = useAliasAvailability(alias)
   const [expiry, setExpiry] = useState('')
@@ -212,18 +217,25 @@ function CreateForm({
   const [limitErrors, setLimitErrors] = useState<LimitErrors>({})
   const [options, setOptions] = useState(false)
   const [errors, setErrors] = useState<ReturnType<typeof validateDraft>>({})
-  const [pasteMessage, setPasteMessage] = useState('')
+  const [pasteMessage, setPasteMessage] = useState(
+    pasted ? 'Pasted from your clipboard. Press Enter to shorten it.' : '',
+  )
   const [attempt, setAttempt] = useState<Attempt | null>(null)
   const [problem, setProblem] = useState<ApiProblem | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [result, setResult] = useState<CreatedLink | null>(null)
-  const resultHeading = useRef<HTMLHeadingElement>(null)
+  const copyButton = useRef<HTMLButtonElement>(null)
+  const submitButton = useRef<HTMLButtonElement>(null)
   const urlInput = useRef<HTMLInputElement>(null)
   const inFlight = useRef<AbortController | null>(null)
 
   useEffect(() => {
-    if (result) resultHeading.current?.focus()
+    if (result) copyButton.current?.focus()
   }, [result])
+
+  useEffect(() => {
+    if (pasted) submitButton.current?.focus()
+  }, [pasted])
 
   useEffect(() => () => inFlight.current?.abort(), [])
 
@@ -384,12 +396,25 @@ function CreateForm({
             <Plus size={16} /> Create another
           </button>
         </div>
-        <h2 ref={resultHeading} tabIndex={-1} id="result-heading">
+        <h2 tabIndex={-1} id="result-heading">
           A shorter way to share.
         </h2>
-        <div className="result-address">
-          <span>{displayShortUrl(result.short_url)}</span>
+        <div
+          className="result-address"
+          data-copy-url={fullUrl(result.short_url)}
+          data-copy-default=""
+        >
+          <input
+            className="result-url"
+            value={fullUrl(result.short_url)}
+            readOnly
+            aria-label="Short link"
+            spellCheck={false}
+            onClick={(event) => event.currentTarget.select()}
+            onFocus={(event) => event.currentTarget.select()}
+          />
           <button
+            ref={copyButton}
             type="button"
             className="secondary-button result-copy"
             onClick={() => onCopy(result.short_url)}
@@ -713,6 +738,7 @@ function CreateForm({
             <ShieldCheck size={15} /> Saved to {workspaceName}
           </span>
           <button
+            ref={submitButton}
             type="submit"
             className="primary-button"
             disabled={submitting}
@@ -1017,7 +1043,12 @@ function DetailPage({
           </div>
         </div>
       )}
-      <section className="detail-link-panel panel" aria-label="Link details">
+      <section
+        className="detail-link-panel panel"
+        aria-label="Link details"
+        data-copy-url={link.shortUrl ? fullUrl(link.shortUrl) : undefined}
+        data-copy-default=""
+      >
         <div>
           <span className="meta">
             {link.isCustomAlias ? 'Custom alias' : 'Short link'}
@@ -1058,6 +1089,14 @@ function DetailPage({
             title="A preview link shows the destination and safety notes before anyone visits."
           >
             <Eye size={15} /> Copy preview link
+          </button>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => onCopy(link.destination)}
+            disabled={!link.destination}
+          >
+            <ExternalLink size={15} /> Copy destination
           </button>
         </div>
       </section>
@@ -1402,6 +1441,7 @@ function WorkspaceShell() {
   const menuButton = useRef<HTMLButtonElement>(null)
   const [notice, setNotice] = useState('')
   const [manualCopy, setManualCopy] = useState<string | null>(null)
+  const [pasted, setPasted] = useState<string | undefined>(undefined)
   const [importOpen, setImportOpen] = useState(false)
   const firstRoute = useRef(true)
   const analyticsControllers = useRef(new Map<string, AbortController>())
@@ -1613,19 +1653,34 @@ function WorkspaceShell() {
     setNotice('CSV export downloaded.')
   }
 
-  async function copy(value: string) {
+  const copy = useCallback(async (value: string, message = 'Copied to clipboard.') => {
     if (!value) return
-    try {
-      await navigator.clipboard.writeText(value)
-      setNotice('Copied to clipboard.')
-    } catch {
-      setManualCopy(value)
-    }
+    const outcome = await copyText(value)
+    if (outcome === 'manual') setManualCopy(value)
+    else setNotice(message)
+  }, [])
+
+  const copyLink = useCallback(
+    (value: string) => copy(fullUrl(value), 'Link copied to clipboard.'),
+    [copy],
+  )
+
+  function copyFocusedLink(): boolean {
+    const focused = document.activeElement?.closest<HTMLElement>('[data-copy-url]')
+    const hovered = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-copy-url]:hover'),
+    ).pop()
+    const fallback = document.querySelector<HTMLElement>('[data-copy-url][data-copy-default]')
+    const value = (focused ?? hovered ?? fallback)?.dataset.copyUrl
+    if (!value) return false
+    void copyLink(value)
+    return true
   }
 
   function newLink() {
     if (!canEdit) return
     setDrawerOpen(false)
+    setPasted(undefined)
     setComposerVersion((version) => version + 1)
     if (!isHome) navigate('/')
     window.requestAnimationFrame(() =>
@@ -1642,6 +1697,7 @@ function WorkspaceShell() {
       record,
       ...current.filter((item) => item.code !== record.code),
     ])
+    setPasted(undefined)
     setNotice('Short link created and live.')
     void loadAnalytics(record.code)
   }
@@ -1685,6 +1741,8 @@ function WorkspaceShell() {
         if (!search) return
         event.preventDefault()
         search.focus()
+      } else if (action === 'copy') {
+        if (copyFocusedLink()) event.preventDefault()
       } else if (action === 'toggle-sidebar') {
         if (narrow) return
         event.preventDefault()
@@ -1696,6 +1754,23 @@ function WorkspaceShell() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
+  })
+
+  useEffect(() => {
+    function onPaste(event: ClipboardEvent) {
+      if (!canEdit) return
+      const target = event.target instanceof HTMLElement ? event.target : null
+      if (!pasteIsForPage(target, document.querySelector('dialog[open]') !== null)) return
+      const url = urlFromPaste(event.clipboardData?.getData('text/plain') ?? '')
+      if (!url) return
+      event.preventDefault()
+      setDrawerOpen(false)
+      setPasted(url)
+      setComposerVersion((version) => version + 1)
+      if (!isHome) navigate('/')
+    }
+    document.addEventListener('paste', onPaste)
+    return () => document.removeEventListener('paste', onPaste)
   })
 
   if (!workspace || !role || !user) {
@@ -1715,6 +1790,7 @@ function WorkspaceShell() {
   const rail = collapsed && !narrow
 
   return (
+    <CopyContext.Provider value={copy}>
     <div className={`workspace${rail ? ' sidebar-collapsed' : ''}`}>
       <a className="skip-link" href="#main-content">
         Skip to content
@@ -1802,7 +1878,8 @@ function WorkspaceShell() {
                         workspaceName={workspaceName}
                         links={links}
                         onCreate={handleCreated}
-                        onCopy={copy}
+                        onCopy={copyLink}
+                        pasted={pasted}
                       />
                     ) : (
                       <ReadOnlyCard />
@@ -1836,7 +1913,7 @@ function WorkspaceShell() {
                       </div>
                     </div>
                   ) : (
-                    <LinkList links={links} overview onCopy={copy} />
+                    <LinkList links={links} overview onCopy={copyLink} />
                   )}
                   <div className="workspace-bottom-note">
                     <ShieldCheck size={16} />
@@ -1903,7 +1980,7 @@ function WorkspaceShell() {
                   ) : (
                     <LinkList
                       links={links}
-                      onCopy={copy}
+                      onCopy={copyLink}
                       onExport={exportLinks}
                       onImport={canEdit ? () => setImportOpen(true) : undefined}
                     />
@@ -1930,7 +2007,7 @@ function WorkspaceShell() {
                   workspaceId={workspaceId}
                   workspaceName={workspaceName}
                   canEdit={canEdit}
-                  onCopy={copy}
+                  onCopy={copyLink}
                   onLoaded={handleLoaded}
                   onDeleted={handleDeleted}
                   notify={setNotice}
@@ -2121,7 +2198,12 @@ function WorkspaceShell() {
               <h3>Keyboard shortcuts</h3>
               <p>
                 <kbd>N</kbd> new link · <kbd>/</kbd> search links ·{' '}
+                <kbd>C</kbd> copy the hovered, selected, or open link ·{' '}
                 <kbd>[</kbd> collapse sidebar · <kbd>?</kbd> this help
+              </p>
+              <p>
+                <kbd>⌘V</kbd> or <kbd>Ctrl+V</kbd> anywhere outside a text box
+                pastes a URL into a new short link.
               </p>
             </div>
           </div>
@@ -2153,7 +2235,9 @@ function WorkspaceShell() {
             id="manual-copy"
             value={manualCopy}
             readOnly
+            autoFocus
             onFocus={(event) => event.target.select()}
+            onClick={(event) => event.currentTarget.select()}
           />
           <button
             type="button"
@@ -2167,6 +2251,7 @@ function WorkspaceShell() {
         </Modal>
       )}
     </div>
+    </CopyContext.Provider>
   )
 }
 

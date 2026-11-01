@@ -13,6 +13,8 @@ describe('keyboard shortcuts', () => {
     expect(shortcutFor(press('/'))).toBe('search')
     expect(shortcutFor(press('?'))).toBe('help')
     expect(shortcutFor(press('['))).toBe('toggle-sidebar')
+    expect(shortcutFor(press('c'))).toBe('copy')
+    expect(shortcutFor(press('C'))).toBe('copy')
     expect(shortcutFor(press('x'))).toBeNull()
   })
 
@@ -27,6 +29,8 @@ describe('keyboard shortcuts', () => {
     expect(shortcutFor(press('n', { metaKey: true }))).toBeNull()
     expect(shortcutFor(press('n', { ctrlKey: true }))).toBeNull()
     expect(shortcutFor(press('n', { altKey: true }))).toBeNull()
+    expect(shortcutFor(press('c', { metaKey: true }))).toBeNull()
+    expect(shortcutFor(press('c', { target: { tagName: 'INPUT' } }))).toBeNull()
     expect(shortcutFor(press('n'), true)).toBeNull()
   })
 })

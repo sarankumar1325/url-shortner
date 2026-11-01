@@ -4,6 +4,7 @@ import {
   ArrowDownRight,
   ArrowUpRight,
   BarChart3,
+  Copy,
   ExternalLink,
   QrCode,
   RefreshCw,
@@ -13,6 +14,8 @@ import { Link } from 'react-router-dom'
 import { getDashboard, isProblem, type Dashboard as DashboardData } from './api'
 import { ClickChart } from './ClickChart'
 import { Breakdown } from './LinkAnalytics'
+import { fullUrl } from './clipboard'
+import { useCopy } from './copyContext'
 import {
   ISSUE_LABEL,
   STATUS_LABEL,
@@ -77,6 +80,7 @@ export default function Dashboard({
   workspaceId: string
   workspaceName: string
 }) {
+  const copy = useCopy()
   const [days, setDays] = useState<Period>(30)
   const [reload, setReload] = useState(0)
   const [filter, setFilter] = useState<HealthFilter>('all')
@@ -378,7 +382,7 @@ export default function Dashboard({
                   const usage = limitUsage(link)
                   const flags = link.issues.filter((issue) => issue !== link.status)
                   return (
-                    <tr key={link.short_code}>
+                    <tr key={link.short_code} data-copy-url={fullUrl(link.short_url)}>
                       <td data-label="Link">
                         <Link to={`/links/${encodeURIComponent(link.short_code)}`} className="health-link">
                           <strong>{displayShortUrl(link.short_url)}</strong>
@@ -431,6 +435,15 @@ export default function Dashboard({
                         )}
                       </td>
                       <td className="row-actions">
+                        <button
+                          type="button"
+                          className="icon-button"
+                          aria-label={`Copy short link for ${link.short_code}`}
+                          title="Copy link"
+                          onClick={() => void copy(fullUrl(link.short_url), 'Link copied to clipboard.')}
+                        >
+                          <Copy size={15} />
+                        </button>
                         <Link
                           className="icon-button"
                           to={`/qr?code=${encodeURIComponent(link.short_code)}`}
